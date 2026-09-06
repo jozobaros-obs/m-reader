@@ -12,8 +12,11 @@ Funkcie:
   * Otvorenie súboru cez argument príkazového riadka (asociácia .md).
 """
 
+import json
 import os
+import re
 import sys
+import unicodedata
 
 import markdown
 from PySide6.QtCore import Qt, QFileSystemWatcher, QSettings, QUrl, QTimer
@@ -25,6 +28,9 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QSplitter,
+    QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QWidget,
     QVBoxLayout,
 )
@@ -33,6 +39,17 @@ from PySide6.QtWebEngineCore import QWebEnginePage
 
 APP_NAME = "MD Reader"
 ORG_NAME = "MDReader"
+
+
+def github_slugify(value, separator="-"):
+    """Vytvorí ID nadpisu rovnako ako GitHub, aby odkazy v obsahu (TOC)
+    fungovali. Na rozdiel od predvoleného slugify v python-markdown
+    NESTLÁČA viacnásobné medzery do jednej pomlčky
+    (napr. ``try / except`` -> ``try--except``)."""
+    value = unicodedata.normalize("NFC", value).strip().lower()
+    value = re.sub(r"[^\w\s-]", "", value, flags=re.UNICODE)   # zahoď interpunkciu
+    value = re.sub(r"\s", separator, value)                     # každá medzera -> pomlčka
+    return value
 
 
 # --------------------------------------------------------------------------- #
@@ -182,8 +199,52 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <article class="markdown-body">
 {content}
 </article>
+<script>{script}</script>
 </body>
 </html>
+"""
+
+# Robustné spracovanie klikov na kotvy v obsahu (TOC). Funguje pre súbory
+# generované AKÝMKOĽVEK nástrojom (GitHub, VS Code, pandoc, python-markdown…):
+# ak kotva nesedí presne na žiadne ID, nájde nadpis "fuzzy" porovnaním, kde
+# sa ignoruje počet pomlčiek aj interpunkcia.
+ANCHOR_JS = r"""
+(function () {
+    function norm(s) {
+        try { s = decodeURIComponent(s); } catch (e) {}
+        return (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+    }
+    function findTarget(frag) {
+        if (!frag) return null;
+        var el = document.getElementById(frag);
+        if (el) return el;
+        try {
+            el = document.querySelector('[name="' + CSS.escape(frag) + '"]');
+            if (el) return el;
+        } catch (e) {}
+        var nf = norm(frag);
+        if (!nf) return null;
+        var heads = document.querySelectorAll("h1,h2,h3,h4,h5,h6");
+        for (var i = 0; i < heads.length; i++) {
+            if (heads[i].id && norm(heads[i].id) === nf) return heads[i];
+        }
+        for (var i = 0; i < heads.length; i++) {
+            if (norm(heads[i].textContent) === nf) return heads[i];
+        }
+        return null;
+    }
+    document.addEventListener("click", function (e) {
+        var a = e.target && e.target.closest ? e.target.closest("a") : null;
+        if (!a) return;
+        var href = a.getAttribute("href") || "";
+        if (href.charAt(0) !== "#") return;      // len interné kotvy
+        var t = findTarget(href.slice(1));
+        if (t) {
+            e.preventDefault();
+            t.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+    }, true);
+})();
 """
 
 
@@ -225,19 +286,28 @@ class MdReader(QMainWindow):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
+        # ľavý panel s dvoma záložkami: Súbory / Obsah (TOC)
         self.sidebar = QListWidget()
-        self.sidebar.setMaximumWidth(280)
-        self.sidebar.setMinimumWidth(160)
         self.sidebar.itemClicked.connect(self._on_sidebar_click)
+
+        self.outline = QTreeWidget()
+        self.outline.setHeaderHidden(True)
+        self.outline.itemClicked.connect(self._on_outline_click)
+
+        self.panel = QTabWidget()
+        self.panel.setMaximumWidth(320)
+        self.panel.setMinimumWidth(160)
+        self.panel.addTab(self.sidebar, "Súbory")
+        self.panel.addTab(self.outline, "Obsah")
 
         self.view = QWebEngineView()
         self.view.setPage(ReaderPage(self.view))
 
         self.splitter = QSplitter(Qt.Horizontal)
-        self.splitter.addWidget(self.sidebar)
+        self.splitter.addWidget(self.panel)
         self.splitter.addWidget(self.view)
         self.splitter.setStretchFactor(1, 1)
-        self.splitter.setSizes([220, 900])
+        self.splitter.setSizes([240, 900])
 
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -320,8 +390,7 @@ class MdReader(QMainWindow):
             self._render_html(f"<h1>Chyba pri čítaní súboru</h1><pre>{exc}</pre>")
             return
 
-        html = markdown.markdown(
-            text,
+        md = markdown.Markdown(
             extensions=[
                 "extra",          # tabuľky, fenced code, footnotes, atď.
                 "codehilite",     # zvýraznenie syntaxe (Pygments)
@@ -332,8 +401,11 @@ class MdReader(QMainWindow):
             ],
             extension_configs={
                 "codehilite": {"guess_lang": False, "css_class": "codehilite"},
+                "toc": {"slugify": github_slugify},
             },
         )
+        html = md.convert(text)
+        self._populate_outline(getattr(md, "toc_tokens", []))
         self._render_html(html, base_dir=os.path.dirname(path))
 
     def _render_html(self, content, base_dir=None):
@@ -342,6 +414,7 @@ class MdReader(QMainWindow):
             base=BASE_CSS,
             pygments=PYGMENTS_DARK if self.dark else PYGMENTS_LIGHT,
             content=content,
+            script=ANCHOR_JS,
         )
         base_url = QUrl.fromLocalFile(base_dir + os.sep) if base_dir else QUrl()
         self.view.setHtml(page, base_url)
@@ -384,7 +457,38 @@ class MdReader(QMainWindow):
         self.load_file(item.data(Qt.UserRole))
 
     def _toggle_sidebar(self):
-        self.sidebar.setVisible(not self.sidebar.isVisible())
+        self.panel.setVisible(not self.panel.isVisible())
+
+    # ---- obsah dokumentu (TOC / outline) ----------------------------------- #
+    def _populate_outline(self, tokens):
+        self.outline.clear()
+
+        def add(parent, node):
+            item = QTreeWidgetItem([node.get("name", "")])
+            item.setData(0, Qt.UserRole, node.get("id", ""))
+            if parent is None:
+                self.outline.addTopLevelItem(item)
+            else:
+                parent.addChild(item)
+            for child in node.get("children", []):
+                add(item, child)
+
+        for tok in tokens:
+            add(None, tok)
+        self.outline.expandAll()
+
+    def _on_outline_click(self, item, _column=0):
+        anchor = item.data(0, Qt.UserRole)
+        if anchor:
+            self._scroll_to(anchor)
+
+    def _scroll_to(self, anchor):
+        js = (
+            "var e=document.getElementById(%s);"
+            "if(e){e.scrollIntoView({behavior:'smooth',block:'start'});}"
+            % json.dumps(anchor)
+        )
+        self.view.page().runJavaScript(js)
 
     # ---- téma -------------------------------------------------------------- #
     def toggle_theme(self):

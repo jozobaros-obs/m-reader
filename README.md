@@ -17,7 +17,11 @@ syntax highlighting, tables, a dark mode and a file sidebar.
 - 📄 **GitHub-style rendering** of Markdown (headings, tables, blockquotes, images, code).
 - 🎨 **Syntax highlighting** for code blocks (Pygments).
 - 🌗 **Light / dark theme** toggle (remembered between sessions).
-- 🗂️ **Sidebar** listing every `.md` file in the current folder for quick switching.
+- 🗂️ **Switchable sidebar** — flip between the **Files** in the current folder and a
+  document **Outline** (table of contents), like a PDF reader. Click any heading to jump to it.
+- 🔗 **Table-of-contents links that actually work** — anchor links jump to the right
+  heading regardless of which tool generated them (GitHub, VS Code, pandoc, …),
+  thanks to fuzzy anchor matching.
 - 🔄 **Live reload** — the view refreshes automatically when the file changes on disk.
 - 🪟 **Windows integration** — installs as the default app for `.md` files and adds a Start Menu shortcut.
 - 🖱️ No console window — opens cleanly on double-click.
