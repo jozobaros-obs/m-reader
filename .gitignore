@@ -9,6 +9,11 @@ venv/
 mdreader.ico
 run_hidden.vbs
 
+# PyInstaller build output
+build/
+dist/
+*.spec
+
 # OS / editor
 Thumbs.db
 Desktop.ini

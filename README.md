@@ -62,6 +62,20 @@ The installer (no admin rights needed, everything under `HKCU`):
 > right-click a `.md` file → **Open with** → **Choose another app** → pick
 > **MD Reader** and tick *Always use this app*.
 
+### Alternative: standalone `.exe`
+
+Prefer a self-contained executable that doesn't need Python installed? Build one
+with PyInstaller:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build_exe.ps1            # folder with MD Reader.exe (recommended)
+powershell -ExecutionPolicy Bypass -File build_exe.ps1 -OneFile   # a single .exe
+```
+
+The result lands in `dist\MD Reader\MD Reader.exe` (or `dist\MD Reader.exe` with
+`-OneFile`). Because it bundles Qt WebEngine, the output is large (~200–300 MB);
+the folder build starts faster than the one-file build.
+
 ## Usage
 
 - **Double-click** any `.md` file, or
@@ -100,6 +114,7 @@ md-reader/
 ├─ md_reader.py       # the application
 ├─ install.ps1        # installer (deps + file association + shortcut)
 ├─ uninstall.ps1      # removes associations & shortcut
+├─ build_exe.ps1      # builds a standalone .exe (PyInstaller)
 ├─ make_icon.ps1      # generates mdreader.ico
 ├─ requirements.txt   # Python dependencies
 ├─ ukazka.md          # sample Markdown file

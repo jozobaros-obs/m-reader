@@ -43,6 +43,13 @@ APP_NAME = "MD Reader"
 ORG_NAME = "MDReader"
 
 
+def resource_path(name):
+    """Cesta k priloženému súboru – funguje pri spustení zo skriptu aj
+    z .exe zabaleného PyInstallerom (sys._MEIPASS)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
+
+
 def github_slugify(value, separator="-"):
     """Vytvorí ID nadpisu rovnako ako GitHub, aby odkazy v obsahu (TOC)
     fungovali. Na rozdiel od predvoleného slugify v python-markdown
@@ -384,7 +391,7 @@ class MdReader(QMainWindow):
     # ---- UI ---------------------------------------------------------------- #
     def _build_ui(self):
         self.setWindowTitle(APP_NAME)
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mdreader.ico")
+        icon_path = resource_path("mdreader.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
@@ -676,7 +683,7 @@ def main():
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)
 
-    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mdreader.ico")
+    icon_path = resource_path("mdreader.ico")
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
 
