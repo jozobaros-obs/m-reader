@@ -421,9 +421,24 @@ class MdReader(QMainWindow):
 
 
 def main():
+    # Windows: vlastné AppUserModelID => taskbar použije ikonu okna,
+    # nie ikonu hostiteľského pythonw.exe.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "MDReader.App"
+            )
+        except Exception:
+            pass
+
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)
+
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mdreader.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
 
     win = MdReader()
     win.show()
