@@ -1,13 +1,13 @@
 <#
-    MD Reader – inštalačný skript pre Windows.
+    M Reader – inštalačný skript pre Windows.
 
     Čo robí:
-      1. Nainštaluje potrebné Python knižnice (PySide6, Markdown, Pygments).
-      2. Vygeneruje ikonu aplikácie (mdreader.ico).
+      1. Nainštaluje potrebné Python knižnice (z requirements.txt).
+      2. Vygeneruje ikonu aplikácie.
       3. Vytvorí launcher (run_hidden.vbs) ktorý spustí appku cez pythonw
          bez čierneho okna konzoly.
-      4. Zaregistruje ProgID a asociuje prípony .md / .markdown, aby sa
-         súbory otvárali v MD Readeri (dvojklik / "Otvoriť pomocou").
+      4. Zaregistruje ProgID a asociuje prípony .md, .html a .pdf, aby sa
+         súbory otvárali v M Readeri (dvojklik / "Otvoriť pomocou").
       5. Vytvorí zástupcu v Štart menu.
 
     Spustenie:
@@ -19,13 +19,13 @@
 
 $ErrorActionPreference = "Stop"
 
-$AppName    = "MD Reader"
-$ProgId     = "MDReader.Markdown"
+$AppName    = "M Reader"
+$ProgId     = "MReader.Document"
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$MainPy     = Join-Path $ScriptDir "md_reader.py"
+$MainPy     = Join-Path $ScriptDir "m_reader.py"
 $IconPath   = Join-Path $ScriptDir "mdreader.ico"
 $VbsPath    = Join-Path $ScriptDir "run_hidden.vbs"
-$Extensions = @(".md", ".markdown", ".mdown", ".mkd")
+$Extensions = @(".md", ".markdown", ".mdown", ".mkd", ".html", ".htm", ".pdf")
 
 Write-Host "=== Inštalácia $AppName ===" -ForegroundColor Cyan
 
@@ -61,7 +61,7 @@ Write-Host "`nGenerujem ikonu..." -ForegroundColor Cyan
 # 4) Launcher bez konzoly (VBS -> pythonw)                                     #
 # --------------------------------------------------------------------------- #
 $vbs = @"
-' Spustí MD Reader cez pythonw bez okna konzoly.
+' Spustí M Reader cez pythonw bez okna konzoly.
 Set args = WScript.Arguments
 cmd = """$pythonw"" ""$MainPy"""
 If args.Count > 0 Then
@@ -75,13 +75,13 @@ Write-Host "Launcher: $VbsPath"
 # --------------------------------------------------------------------------- #
 # 5) Registrácia ProgID + asociácia prípon (HKCU – bez admin práv)            #
 # --------------------------------------------------------------------------- #
-Write-Host "`nRegistrujem asociáciu .md súborov..." -ForegroundColor Cyan
+Write-Host "`nRegistrujem asociácie .md / .html / .pdf ..." -ForegroundColor Cyan
 $classes = "HKCU:\Software\Classes"
 
 # ProgID
 $progRoot = Join-Path $classes $ProgId
 New-Item -Path $progRoot -Force | Out-Null
-Set-ItemProperty -Path $progRoot -Name "(default)" -Value "Markdown dokument"
+Set-ItemProperty -Path $progRoot -Name "(default)" -Value "M Reader dokument"
 
 New-Item -Path (Join-Path $progRoot "DefaultIcon") -Force | Out-Null
 Set-ItemProperty -Path (Join-Path $progRoot "DefaultIcon") -Name "(default)" -Value "`"$IconPath`""
@@ -124,14 +124,14 @@ $sc.TargetPath       = "wscript.exe"
 $sc.Arguments        = "`"$VbsPath`""
 $sc.WorkingDirectory = $ScriptDir
 $sc.IconLocation     = $IconPath
-$sc.Description       = "Čítačka Markdown súborov"
+$sc.Description       = "Čítačka MD / HTML / PDF súborov"
 $sc.Save()
 
 # --------------------------------------------------------------------------- #
 Write-Host "`n=== Hotovo! ===" -ForegroundColor Green
-Write-Host "MD Reader nájdeš v Štart menu."
+Write-Host "M Reader nájdeš v Štart menu."
 Write-Host ""
 Write-Host "POZNÁMKA: Windows kvôli ochrane niekedy vyžaduje jednorazové" -ForegroundColor Yellow
-Write-Host "potvrdenie predvolenej aplikácie. Ak sa .md neotvára automaticky:" -ForegroundColor Yellow
-Write-Host "  1) klikni pravým na .md súbor -> Otvoriť pomocou -> Zvoliť inú aplikáciu"
-Write-Host "  2) vyber 'MD Reader' a zaškrtni 'Vždy používať túto aplikáciu'."
+Write-Host "potvrdenie predvolenej aplikácie. Ak sa súbor neotvára automaticky:" -ForegroundColor Yellow
+Write-Host "  1) klikni pravým na súbor -> Otvoriť pomocou -> Zvoliť inú aplikáciu"
+Write-Host "  2) vyber 'M Reader' a zaškrtni 'Vždy používať túto aplikáciu'."

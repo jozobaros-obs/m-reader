@@ -38,8 +38,8 @@ $tile   = New-RoundedRect $margin $margin $inner $inner 52
 
 # gradient (fialová -> indigová)
 $rect = New-Object System.Drawing.RectangleF($margin, $margin, $inner, $inner)
-$c1 = [System.Drawing.Color]::FromArgb(255, 139, 92, 246)   # #8B5CF6 violet
-$c2 = [System.Drawing.Color]::FromArgb(255, 79, 70, 229)    # #4F46E5 indigo
+$c1 = [System.Drawing.Color]::FromArgb(255, 34, 197, 94)    # #22C55E green
+$c2 = [System.Drawing.Color]::FromArgb(255, 21, 128, 61)    # #15803D dark green
 $grad = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect, $c1, $c2, 55.0)
 $g.FillPath($grad, $tile)
 
