@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Generated at install time
+mdreader.ico
+run_hidden.vbs
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+
+# Temp
+_*.log
+_preview.png
