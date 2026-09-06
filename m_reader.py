@@ -16,7 +16,9 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
 import unicodedata
 
 import markdown
@@ -92,6 +94,16 @@ def file_kind(path):
     if ext in PDF_EXTS:
         return "pdf"
     return "md"
+
+
+def find_espeak():
+    """Nájde espeak-ng.exe (offline TTS, podporuje aj jazyky, ktoré Windows
+    hlasy nemajú – napr. slovenčinu). Vráti cestu alebo None."""
+    for p in (r"C:\Program Files\eSpeak NG\espeak-ng.exe",
+              r"C:\Program Files (x86)\eSpeak NG\espeak-ng.exe"):
+        if os.path.isfile(p):
+            return p
+    return shutil.which("espeak-ng")
 
 
 def github_slugify(value, separator="-"):
@@ -586,6 +598,10 @@ class MReader(QMainWindow):
             preferred = [e for e in ("winrt", "sapi") if e in engines]
             eng = preferred[0] if preferred else (engines[0] if engines else "")
             self.tts = QTextToSpeech(eng, self) if eng else QTextToSpeech(self)
+        # eSpeak NG – záloha pre jazyky bez Windows hlasu (napr. slovenčina)
+        self.espeak_path = find_espeak()
+        self._espeak_proc = None
+        self._espeak_tmp = None
 
         self._build_ui()
         self._restore_geometry()
@@ -689,8 +705,8 @@ class MReader(QMainWindow):
         self.find_action.triggered.connect(self._show_find)
         tb.addAction(self.find_action)
 
-        # Prečítať nahlas (len ak je TTS dostupné)
-        if self.tts:
+        # Prečítať nahlas (ak je dostupné Windows TTS alebo eSpeak NG)
+        if self.tts or self.espeak_path:
             self.speak_action = QAction(self)
             self.speak_action.setShortcut("Ctrl+R")
             self.speak_action.triggered.connect(self.speak_selection)
@@ -742,7 +758,7 @@ class MReader(QMainWindow):
         self.export_pdf_action.setText(self.t("export_pdf"))
         self.export_html_action.setText(self.t("export_html"))
         self.find_action.setText(self.t("find"))
-        if self.tts:
+        if self.tts or self.espeak_path:
             self.speak_action.setText(self.t("read_aloud"))
             self.stop_action.setText(self.t("stop_reading"))
         self.theme_action.setText(self.t("dark_mode"))
@@ -799,7 +815,9 @@ class MReader(QMainWindow):
         elif self.current_kind == "html":
             self.view.setUrl(QUrl.fromLocalFile(path))
         elif self.current_kind == "pdf":
-            self._populate_pdf_outline(path)
+            # PDF prehliadač má vlastný (funkčný) obsah – náš zbytočný TOC
+            # nezobrazujeme, prepneme na záložku Súbory.
+            self.panel.setCurrentIndex(0)
             self.view.setUrl(QUrl.fromLocalFile(path))
 
         self.setWindowTitle(f"{os.path.basename(path)} — {APP_NAME}")
@@ -908,29 +926,6 @@ class MReader(QMainWindow):
             stack.append((level, item))
         self.outline.expandAll()
 
-    def _populate_pdf_outline(self, path):
-        self.outline.clear()
-        if not fitz:
-            return
-        try:
-            doc = fitz.open(path)
-            toc = doc.get_toc()
-            doc.close()
-        except Exception:
-            return
-        stack = []
-        for level, title, page in toc:
-            item = QTreeWidgetItem([title])
-            item.setData(0, Qt.UserRole, ("page", max(1, page)))
-            while stack and stack[-1][0] >= level:
-                stack.pop()
-            if stack:
-                stack[-1][1].addChild(item)
-            else:
-                self.outline.addTopLevelItem(item)
-            stack.append((level, item))
-        self.outline.expandAll()
-
     def _on_outline_click(self, item, _column=0):
         data = item.data(0, Qt.UserRole)
         if not data:
@@ -938,10 +933,6 @@ class MReader(QMainWindow):
         kind, value = data
         if kind == "anchor" and value:
             self._scroll_to(value)
-        elif kind == "page":
-            url = QUrl.fromLocalFile(self.current_file)
-            url.setFragment(f"page={value}")
-            self.view.setUrl(url)
 
     def _scroll_to(self, anchor):
         js = (
@@ -998,36 +989,46 @@ class MReader(QMainWindow):
 
     # ---- čítanie nahlas (TTS) ---------------------------------------------- #
     def speak_selection(self):
-        """Prečíta označený text; ak nič nie je označené, číta od aktuálnej
-        pozície (prvého viditeľného odseku) po koniec dokumentu."""
-        if not self.tts:
+        """Prečíta označený text; ak nič nie je označené, číta od miesta
+        posledného kliknutia (kurzora), inak od prvého viditeľného odseku."""
+        if not (self.tts or self.espeak_path):
             return
         self.view.page().runJavaScript(SPEAK_JS, self._speak_text)
 
     def _speak_text(self, text):
-        if not (self.tts and text and text.strip()):
+        if not text or not text.strip():
             return
-        self._apply_tts_language(text)
-        self.tts.stop()
-        self.tts.say(text)
+        self.stop_speaking()
+        code = self._detect_lang(text)
+        # 1) prirodzený Windows hlas pre daný jazyk (ak existuje)
+        if self.tts and self._set_windows_voice(code):
+            self.tts.say(text)
+            return
+        # 2) eSpeak NG – offline, podporuje aj jazyky bez Windows hlasu (sk…)
+        if self.espeak_path and code and self._speak_espeak(text, code):
+            return
+        # 3) posledná záchrana – predvolený Windows hlas
+        if self.tts:
+            self.tts.say(text)
 
-    def _apply_tts_language(self, text):
-        """Zvolí hlas podľa jazyka textu (ak je nainštalovaný zodpovedajúci
-        hlas – hľadá aj naprieč TTS enginmi); inak ponechá predvolený."""
+    def _detect_lang(self, text):
         if not detect_language:
-            return
-        sample = text.strip()[:1000]
+            return None
         try:
-            code = detect_language(sample)          # napr. 'en', 'sk', 'ru', 'es'
+            return detect_language(text.strip()[:1000])   # 'en','sk','ru','es'…
         except Exception:
-            return
+            return None
+
+    def _set_windows_voice(self, code):
+        """Nastaví Windows hlas pre jazyk (aj naprieč enginmi). True ak sa
+        podarilo nájsť zodpovedajúci hlas."""
+        if not (self.tts and code):
+            return False
         target = QLocale(code).language()
-        # 1) aktuálny engine
         for loc in self.tts.availableLocales():
             if loc.language() == target:
                 self.tts.setLocale(loc)
-                return
-        # 2) ostatné enginy (okrem 'mock')
+                return True
         current = self.tts.engine()
         for eng in QTextToSpeech.availableEngines():
             if eng in ("mock", current):
@@ -1040,11 +1041,40 @@ class MReader(QMainWindow):
                 if loc.language() == target:
                     self.tts.setEngine(eng)
                     self.tts.setLocale(loc)
-                    return
+                    return True
+        return False
+
+    def _speak_espeak(self, text, code):
+        """Prehrá text cez eSpeak NG (asynchrónne, bez okna konzoly)."""
+        try:
+            fd, path = tempfile.mkstemp(suffix=".txt", prefix="mreader_")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            flags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+            self._espeak_proc = subprocess.Popen(
+                [self.espeak_path, "-v", code, "-f", path],
+                creationflags=flags,
+            )
+            self._espeak_tmp = path
+            return True
+        except Exception:
+            return False
 
     def stop_speaking(self):
         if self.tts:
             self.tts.stop()
+        if self._espeak_proc and self._espeak_proc.poll() is None:
+            try:
+                self._espeak_proc.terminate()
+            except Exception:
+                pass
+        self._espeak_proc = None
+        if self._espeak_tmp and os.path.exists(self._espeak_tmp):
+            try:
+                os.remove(self._espeak_tmp)
+            except OSError:
+                pass
+            self._espeak_tmp = None
 
     # ---- export ------------------------------------------------------------ #
     def export(self, target):

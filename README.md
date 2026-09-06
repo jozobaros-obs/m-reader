@@ -18,9 +18,11 @@ convert between formats, search the text, and set it as your default viewer.
   native PDF viewer, direct HTML rendering).
 - 🔁 **Convert between formats** — export any open document **to Markdown, PDF or HTML**.
 - 🔎 **Full-text search** in the document (Ctrl+F).
-- 🔊 **Read aloud (offline TTS)** — reads the selected text, or starts from where you're
-  reading; auto-picks a voice matching the document's language via the built-in
-  Windows SAPI voices (offline, free).
+- 🔊 **Read aloud (offline TTS)** — reads the selected text, or starts from where you
+  last clicked (the cursor); auto-detects the text language and picks a matching
+  voice. Uses the built-in Windows voices, and falls back to
+  [eSpeak NG](https://github.com/espeak-ng/espeak-ng) for languages Windows doesn't
+  have installed (e.g. Slovak). All offline and free.
 - 🎨 **Syntax highlighting** for Markdown code blocks (Pygments).
 - 🌗 **Light / dark theme** — toggling keeps your scroll position.
 - 🌍 **Multi-language UI** — English (default), Slovak, Russian, Spanish.
@@ -96,9 +98,17 @@ The result lands in `dist\M Reader\M Reader.exe` (or `dist\M Reader.exe` with
 
 Use the **Export** button to save the current document as Markdown, PDF or HTML.
 
-> **Read-aloud voices:** M Reader uses the voices installed in Windows. To read other
-> languages naturally, add voices in **Settings → Time & language → Speech →
-> Manage voices**. Without a matching voice, text is read with the default one.
+> **Read-aloud voices:** M Reader first uses the natural voices installed in Windows
+> (**Settings → Time & language → Speech → Manage voices**). For languages Windows
+> doesn't offer (e.g. Slovak on managed PCs), install **eSpeak NG** and M Reader will
+> use it automatically:
+> ```powershell
+> winget install eSpeak-NG.eSpeak-NG
+> ```
+> eSpeak NG is offline and free; its voice is robotic but reads the language correctly.
+
+> **PDF outline:** for PDFs, use the PDF viewer's own outline/bookmarks panel; the
+> sidebar **Contents** tab is used for Markdown and HTML documents.
 
 Run it directly without installing:
 
