@@ -15,6 +15,6 @@ Desktop.ini
 .vscode/
 .idea/
 
-# Temp
+# Temp (all underscore-prefixed scratch files)
 _*.log
-_preview.png
+_*.png
