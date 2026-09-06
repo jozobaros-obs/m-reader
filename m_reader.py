@@ -467,12 +467,63 @@ OUTLINE_JS = r"""
 })();
 """
 
-# Text pre nahlas čítanie: ak je niečo označené, vráti výber; inak text
-# od prvého viditeľného odseku (od aktuálnej pozície) po koniec dokumentu.
+# Sleduje kam používateľ klikol v texte (kurzor) – uloží pozíciu, aby sa
+# dala použiť ako začiatok čítania. Injektuje sa po načítaní stránky.
+CARET_TRACK_JS = r"""
+(function () {
+    if (window.__mrTracker) return;
+    window.__mrTracker = true;
+    window.__mrStart = null;
+    document.addEventListener("click", function (e) {
+        var pos = null;
+        if (document.caretRangeFromPoint) {
+            var r = document.caretRangeFromPoint(e.clientX, e.clientY);
+            if (r) pos = { c: r.startContainer, o: r.startOffset };
+        } else if (document.caretPositionFromPoint) {
+            var p = document.caretPositionFromPoint(e.clientX, e.clientY);
+            if (p) pos = { c: p.offsetNode, o: p.offset };
+        }
+        window.__mrStart = pos;
+    }, true);
+})();
+"""
+
+# Text pre nahlas čítanie: 1) označený text, 2) od miesta posledného kliknutia
+# (kurzora) po koniec, 3) od prvého viditeľného odseku po koniec.
 SPEAK_JS = r"""
 (function () {
     var sel = window.getSelection ? window.getSelection().toString() : "";
     if (sel && sel.trim()) return sel;
+    try {
+        if (window.__mrStart && window.__mrStart.c && document.body) {
+            var startNode = window.__mrStart.c;
+            var walker = document.createTreeWalker(
+                document.body, NodeFilter.SHOW_TEXT, {
+                    acceptNode: function (n) {
+                        var p = n.parentNode;
+                        while (p) {
+                            if (p.tagName === "SCRIPT" || p.tagName === "STYLE")
+                                return NodeFilter.FILTER_REJECT;
+                            p = p.parentNode;
+                        }
+                        return NodeFilter.FILTER_ACCEPT;
+                    }
+                });
+            var parts = [], started = false, node;
+            while ((node = walker.nextNode())) {
+                if (!started) {
+                    if (node === startNode) {
+                        started = true;
+                        parts.push(node.data.substring(window.__mrStart.o));
+                    }
+                    continue;
+                }
+                parts.push(node.data);
+            }
+            var t = parts.join("");
+            if (t && t.trim()) return t;
+        }
+    } catch (e) {}
     var blocks = document.querySelectorAll(
         "p,li,h1,h2,h3,h4,h5,h6,pre,td,th,blockquote");
     var out = [];
@@ -527,8 +578,14 @@ class MReader(QMainWindow):
         self.watcher = QFileSystemWatcher(self)
         self.watcher.fileChanged.connect(self._on_file_changed)
 
-        # text-to-speech engine (offline, ak je modul dostupný)
-        self.tts = QTextToSpeech(self) if QTextToSpeech else None
+        # text-to-speech engine (offline). Uprednostní 'winrt' (OneCore hlasy
+        # Windows – podporujú viac jazykov a dajú sa dosťahovať).
+        self.tts = None
+        if QTextToSpeech:
+            engines = QTextToSpeech.availableEngines()
+            preferred = [e for e in ("winrt", "sapi") if e in engines]
+            eng = preferred[0] if preferred else (engines[0] if engines else "")
+            self.tts = QTextToSpeech(eng, self) if eng else QTextToSpeech(self)
 
         self._build_ui()
         self._restore_geometry()
@@ -897,6 +954,9 @@ class MReader(QMainWindow):
     def _on_load_finished(self, ok):
         if not ok:
             return
+        # sleduj kliknutia (kurzor) pre čítanie od pozície – md aj html
+        if self.current_kind in ("md", "html"):
+            self.view.page().runJavaScript(CARET_TRACK_JS)
         # pre HTML súbory zostavíme obsah až po načítaní stránky
         if self.current_kind == "html":
             self.view.page().runJavaScript(OUTLINE_JS, self._apply_html_outline)
@@ -953,7 +1013,7 @@ class MReader(QMainWindow):
 
     def _apply_tts_language(self, text):
         """Zvolí hlas podľa jazyka textu (ak je nainštalovaný zodpovedajúci
-        SAPI hlas); inak ponechá predvolený."""
+        hlas – hľadá aj naprieč TTS enginmi); inak ponechá predvolený."""
         if not detect_language:
             return
         sample = text.strip()[:1000]
@@ -962,10 +1022,25 @@ class MReader(QMainWindow):
         except Exception:
             return
         target = QLocale(code).language()
+        # 1) aktuálny engine
         for loc in self.tts.availableLocales():
             if loc.language() == target:
                 self.tts.setLocale(loc)
                 return
+        # 2) ostatné enginy (okrem 'mock')
+        current = self.tts.engine()
+        for eng in QTextToSpeech.availableEngines():
+            if eng in ("mock", current):
+                continue
+            try:
+                probe = QTextToSpeech(eng)
+            except Exception:
+                continue
+            for loc in probe.availableLocales():
+                if loc.language() == target:
+                    self.tts.setEngine(eng)
+                    self.tts.setLocale(loc)
+                    return
 
     def stop_speaking(self):
         if self.tts:
