@@ -3,3 +3,4 @@ Markdown>=3.5
 Pygments>=2.17
 PyMuPDF>=1.24
 markdownify>=0.11
+langdetect>=1.0.9

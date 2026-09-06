@@ -24,7 +24,7 @@ $ProgId     = "MReader.Document"
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $MainPy     = Join-Path $ScriptDir "m_reader.py"
 $IconPath   = Join-Path $ScriptDir "mdreader.ico"
-$VbsPath    = Join-Path $ScriptDir "run_hidden.vbs"
+$ExePath    = Join-Path $ScriptDir "M Reader.exe"
 $Extensions = @(".md", ".markdown", ".mdown", ".mkd", ".html", ".htm", ".pdf")
 
 Write-Host "=== Inštalácia $AppName ===" -ForegroundColor Cyan
@@ -58,10 +58,43 @@ Write-Host "`nGenerujem ikonu..." -ForegroundColor Cyan
 & (Join-Path $ScriptDir "make_icon.ps1") -OutPath $IconPath
 
 # --------------------------------------------------------------------------- #
-# 4) Launcher bez konzoly (VBS -> pythonw)                                     #
+# 4) Launcher .exe s ikonou (aby dialóg predvolených programov ukázal          #
+#    našu ikonu, nie ikonu wscriptu). Bez konzoly (winexe).                     #
 # --------------------------------------------------------------------------- #
-$vbs = @"
-' Spustí M Reader cez pythonw bez okna konzoly.
+Write-Host "`nZostavujem launcher .exe s ikonou..." -ForegroundColor Cyan
+Get-Process "M Reader" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+$CsPath = Join-Path $ScriptDir "launcher.cs"
+$cs = @"
+using System;
+using System.Diagnostics;
+class Launcher {
+    static void Main(string[] a) {
+        var psi = new ProcessStartInfo(@"$pythonw");
+        psi.UseShellExecute = false;
+        psi.Arguments = "\"" + @"$MainPy" + "\"" + (a.Length > 0 ? " \"" + a[0] + "\"" : "");
+        try { Process.Start(psi); } catch { }
+    }
+}
+"@
+Set-Content -Path $CsPath -Value $cs -Encoding ASCII
+
+$csc = Join-Path ([Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) "csc.exe"
+$UseExe = $false
+if (Test-Path $csc) {
+    & $csc /nologo /target:winexe /win32icon:"$IconPath" /out:"$ExePath" "$CsPath" | Out-Null
+    if ($LASTEXITCODE -eq 0 -and (Test-Path $ExePath)) { $UseExe = $true }
+}
+
+if ($UseExe) {
+    Remove-Item $CsPath -Force -ErrorAction SilentlyContinue
+    $Launcher = $ExePath
+    $OpenCmd  = "`"$ExePath`" `"%1`""
+    Write-Host "Launcher: $ExePath"
+} else {
+    # fallback: VBS cez wscript (bez ikony v dialógu, ale funkčné)
+    $VbsPath = Join-Path $ScriptDir "run_hidden.vbs"
+    $vbs = @"
 Set args = WScript.Arguments
 cmd = """$pythonw"" ""$MainPy"""
 If args.Count > 0 Then
@@ -69,8 +102,11 @@ If args.Count > 0 Then
 End If
 CreateObject("WScript.Shell").Run cmd, 1, False
 "@
-Set-Content -Path $VbsPath -Value $vbs -Encoding ASCII
-Write-Host "Launcher: $VbsPath"
+    Set-Content -Path $VbsPath -Value $vbs -Encoding ASCII
+    $Launcher = "wscript.exe"
+    $OpenCmd  = "wscript.exe `"$VbsPath`" `"%1`""
+    Write-Host "Launcher (fallback VBS): $VbsPath" -ForegroundColor Yellow
+}
 
 # --------------------------------------------------------------------------- #
 # 5) Registrácia ProgID + asociácia prípon (HKCU – bez admin práv)            #
@@ -88,11 +124,20 @@ Set-ItemProperty -Path (Join-Path $progRoot "DefaultIcon") -Name "(default)" -Va
 
 $cmdKey = Join-Path $progRoot "shell\open\command"
 New-Item -Path $cmdKey -Force | Out-Null
-# wscript spustí VBS launcher a odovzdá cestu k súboru (%1)
-$openCmd = "wscript.exe `"$VbsPath`" `"%1`""
-Set-ItemProperty -Path $cmdKey -Name "(default)" -Value $openCmd
+Set-ItemProperty -Path $cmdKey -Name "(default)" -Value $OpenCmd
 
 Set-ItemProperty -Path (Join-Path $progRoot "shell\open") -Name "FriendlyAppName" -Value $AppName
+
+# Ak máme .exe launcher, zaregistruj ho aj ako "Application" – vďaka tomu
+# dialóg "Otvoriť pomocou" / predvolené programy ukáže našu ikonu.
+if ($UseExe) {
+    $appRoot = Join-Path $classes "Applications\M Reader.exe"
+    New-Item -Path (Join-Path $appRoot "shell\open\command") -Force | Out-Null
+    Set-ItemProperty -Path (Join-Path $appRoot "shell\open\command") -Name "(default)" -Value $OpenCmd
+    Set-ItemProperty -Path $appRoot -Name "FriendlyAppName" -Value $AppName
+    New-Item -Path (Join-Path $appRoot "DefaultIcon") -Force | Out-Null
+    Set-ItemProperty -Path (Join-Path $appRoot "DefaultIcon") -Name "(default)" -Value "`"$ExePath`",0"
+}
 
 # Prípony -> ProgID
 foreach ($ext in $Extensions) {
@@ -120,8 +165,13 @@ $startMenu = [Environment]::GetFolderPath("Programs")
 $lnkPath   = Join-Path $startMenu "$AppName.lnk"
 $wshell    = New-Object -ComObject WScript.Shell
 $sc        = $wshell.CreateShortcut($lnkPath)
-$sc.TargetPath       = "wscript.exe"
-$sc.Arguments        = "`"$VbsPath`""
+if ($UseExe) {
+    $sc.TargetPath = $ExePath
+    $sc.Arguments  = ""
+} else {
+    $sc.TargetPath = "wscript.exe"
+    $sc.Arguments  = "`"$VbsPath`""
+}
 $sc.WorkingDirectory = $ScriptDir
 $sc.IconLocation     = $IconPath
 $sc.Description       = "Čítačka MD / HTML / PDF súborov"

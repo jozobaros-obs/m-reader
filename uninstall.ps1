@@ -12,8 +12,9 @@ $classes    = "HKCU:\Software\Classes"
 
 Write-Host "=== Odinštalovanie $AppName ===" -ForegroundColor Cyan
 
-# ProgID
+# ProgID + Application záznam
 Remove-Item -Path (Join-Path $classes $ProgId) -Recurse -Force
+Remove-Item -Path (Join-Path $classes "Applications\M Reader.exe") -Recurse -Force -ErrorAction SilentlyContinue
 
 # Odstráň ProgID z prípon
 foreach ($ext in $Extensions) {

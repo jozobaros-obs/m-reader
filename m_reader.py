@@ -20,7 +20,7 @@ import sys
 import unicodedata
 
 import markdown
-from PySide6.QtCore import Qt, QFileSystemWatcher, QSettings, QUrl, QTimer
+from PySide6.QtCore import Qt, QFileSystemWatcher, QLocale, QSettings, QUrl, QTimer
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -58,6 +58,16 @@ try:
     from markdownify import markdownify as html_to_markdown
 except ImportError:
     html_to_markdown = None
+# text-to-speech (offline, vstavané SAPI hlasy Windows) – voliteľné
+try:
+    from PySide6.QtTextToSpeech import QTextToSpeech
+except ImportError:
+    QTextToSpeech = None
+# detekcia jazyka textu (offline) pre výber správneho hlasu – voliteľné
+try:
+    from langdetect import detect as detect_language
+except ImportError:
+    detect_language = None
 
 APP_NAME = "M Reader"
 ORG_NAME = "MReader"
@@ -120,6 +130,8 @@ TRANSLATIONS = {
         "export_md": "To Markdown",
         "export_pdf": "To PDF",
         "export_html": "To HTML",
+        "read_aloud": "Read aloud",
+        "stop_reading": "Stop reading",
         "files": "Files",
         "outline": "Contents",
         "language_tip": "Language",
@@ -152,6 +164,8 @@ TRANSLATIONS = {
         "export_md": "Do Markdownu",
         "export_pdf": "Do PDF",
         "export_html": "Do HTML",
+        "read_aloud": "Prečítať nahlas",
+        "stop_reading": "Zastaviť čítanie",
         "files": "Súbory",
         "outline": "Obsah",
         "language_tip": "Jazyk",
@@ -184,6 +198,8 @@ TRANSLATIONS = {
         "export_md": "В Markdown",
         "export_pdf": "В PDF",
         "export_html": "В HTML",
+        "read_aloud": "Озвучить",
+        "stop_reading": "Остановить",
         "files": "Файлы",
         "outline": "Содержание",
         "language_tip": "Язык",
@@ -216,6 +232,8 @@ TRANSLATIONS = {
         "export_md": "A Markdown",
         "export_pdf": "A PDF",
         "export_html": "A HTML",
+        "read_aloud": "Leer en voz alta",
+        "stop_reading": "Detener lectura",
         "files": "Archivos",
         "outline": "Contenido",
         "language_tip": "Idioma",
@@ -449,6 +467,31 @@ OUTLINE_JS = r"""
 })();
 """
 
+# Text pre nahlas čítanie: ak je niečo označené, vráti výber; inak text
+# od prvého viditeľného odseku (od aktuálnej pozície) po koniec dokumentu.
+SPEAK_JS = r"""
+(function () {
+    var sel = window.getSelection ? window.getSelection().toString() : "";
+    if (sel && sel.trim()) return sel;
+    var blocks = document.querySelectorAll(
+        "p,li,h1,h2,h3,h4,h5,h6,pre,td,th,blockquote");
+    var out = [];
+    var started = false;
+    for (var i = 0; i < blocks.length; i++) {
+        if (!started) {
+            var r = blocks[i].getBoundingClientRect();
+            if (r.bottom > 4) started = true;   // prvý blok vo viewporte
+        }
+        if (started) {
+            var tx = (blocks[i].innerText || blocks[i].textContent || "").trim();
+            if (tx) out.push(tx);
+        }
+    }
+    if (!out.length && document.body) return document.body.innerText || "";
+    return out.join("\n");
+})();
+"""
+
 
 # --------------------------------------------------------------------------- #
 #  WebEnginePage – externé odkazy otvárame v prehliadači                       #
@@ -483,6 +526,9 @@ class MReader(QMainWindow):
 
         self.watcher = QFileSystemWatcher(self)
         self.watcher.fileChanged.connect(self._on_file_changed)
+
+        # text-to-speech engine (offline, ak je modul dostupný)
+        self.tts = QTextToSpeech(self) if QTextToSpeech else None
 
         self._build_ui()
         self._restore_geometry()
@@ -586,6 +632,17 @@ class MReader(QMainWindow):
         self.find_action.triggered.connect(self._show_find)
         tb.addAction(self.find_action)
 
+        # Prečítať nahlas (len ak je TTS dostupné)
+        if self.tts:
+            self.speak_action = QAction(self)
+            self.speak_action.setShortcut("Ctrl+R")
+            self.speak_action.triggered.connect(self.speak_selection)
+            tb.addAction(self.speak_action)
+
+            self.stop_action = QAction(self)
+            self.stop_action.triggered.connect(self.stop_speaking)
+            tb.addAction(self.stop_action)
+
         tb.addSeparator()
 
         self.theme_action = QAction(self)
@@ -628,6 +685,9 @@ class MReader(QMainWindow):
         self.export_pdf_action.setText(self.t("export_pdf"))
         self.export_html_action.setText(self.t("export_html"))
         self.find_action.setText(self.t("find"))
+        if self.tts:
+            self.speak_action.setText(self.t("read_aloud"))
+            self.stop_action.setText(self.t("stop_reading"))
         self.theme_action.setText(self.t("dark_mode"))
         self.panel_action.setText(self.t("panel"))
         self.find_input.setPlaceholderText(self.t("find_ph"))
@@ -875,6 +935,41 @@ class MReader(QMainWindow):
             self._hide_find()
             return
         super().keyPressEvent(event)
+
+    # ---- čítanie nahlas (TTS) ---------------------------------------------- #
+    def speak_selection(self):
+        """Prečíta označený text; ak nič nie je označené, číta od aktuálnej
+        pozície (prvého viditeľného odseku) po koniec dokumentu."""
+        if not self.tts:
+            return
+        self.view.page().runJavaScript(SPEAK_JS, self._speak_text)
+
+    def _speak_text(self, text):
+        if not (self.tts and text and text.strip()):
+            return
+        self._apply_tts_language(text)
+        self.tts.stop()
+        self.tts.say(text)
+
+    def _apply_tts_language(self, text):
+        """Zvolí hlas podľa jazyka textu (ak je nainštalovaný zodpovedajúci
+        SAPI hlas); inak ponechá predvolený."""
+        if not detect_language:
+            return
+        sample = text.strip()[:1000]
+        try:
+            code = detect_language(sample)          # napr. 'en', 'sk', 'ru', 'es'
+        except Exception:
+            return
+        target = QLocale(code).language()
+        for loc in self.tts.availableLocales():
+            if loc.language() == target:
+                self.tts.setLocale(loc)
+                return
+
+    def stop_speaking(self):
+        if self.tts:
+            self.tts.stop()
 
     # ---- export ------------------------------------------------------------ #
     def export(self, target):

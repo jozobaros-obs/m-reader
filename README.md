@@ -18,6 +18,9 @@ convert between formats, search the text, and set it as your default viewer.
   native PDF viewer, direct HTML rendering).
 - 🔁 **Convert between formats** — export any open document **to Markdown, PDF or HTML**.
 - 🔎 **Full-text search** in the document (Ctrl+F).
+- 🔊 **Read aloud (offline TTS)** — reads the selected text, or starts from where you're
+  reading; auto-picks a voice matching the document's language via the built-in
+  Windows SAPI voices (offline, free).
 - 🎨 **Syntax highlighting** for Markdown code blocks (Pygments).
 - 🌗 **Light / dark theme** — toggling keeps your scroll position.
 - 🌍 **Multi-language UI** — English (default), Slovak, Russian, Spanish.
@@ -41,6 +44,7 @@ Dependencies (installed automatically):
 | [Pygments](https://pypi.org/project/Pygments/) | Code syntax highlighting |
 | [PyMuPDF](https://pypi.org/project/PyMuPDF/) | PDF text/outline & PDF conversion |
 | [markdownify](https://pypi.org/project/markdownify/) | HTML → Markdown conversion |
+| [langdetect](https://pypi.org/project/langdetect/) | Detects text language for read-aloud voice |
 
 ## Installation
 
@@ -86,10 +90,15 @@ The result lands in `dist\M Reader\M Reader.exe` (or `dist\M Reader.exe` with
 | `Ctrl+O` | Open file |
 | `Ctrl+Shift+O` | Open folder |
 | `Ctrl+F` | Find in text |
+| `Ctrl+R` | Read aloud (selection, or from where you're reading) |
 | `Ctrl+D` | Toggle dark mode |
 | `Ctrl+B` | Toggle sidebar |
 
 Use the **Export** button to save the current document as Markdown, PDF or HTML.
+
+> **Read-aloud voices:** M Reader uses the voices installed in Windows. To read other
+> languages naturally, add voices in **Settings → Time & language → Speech →
+> Manage voices**. Without a matching voice, text is read with the default one.
 
 Run it directly without installing:
 

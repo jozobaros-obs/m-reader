@@ -8,6 +8,8 @@ venv/
 # Generated at install time
 mdreader.ico
 run_hidden.vbs
+launcher.cs
+M Reader.exe
 
 # PyInstaller build output
 build/
