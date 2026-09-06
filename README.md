@@ -47,6 +47,7 @@ Dependencies (installed automatically):
 | [PyMuPDF](https://pypi.org/project/PyMuPDF/) | PDF text/outline & PDF conversion |
 | [markdownify](https://pypi.org/project/markdownify/) | HTML → Markdown conversion |
 | [langdetect](https://pypi.org/project/langdetect/) | Detects text language for read-aloud voice |
+| [pytesseract](https://pypi.org/project/pytesseract/) | OCR for scanned/image PDFs (needs Tesseract) |
 
 ## Installation
 
@@ -98,14 +99,16 @@ The result lands in `dist\M Reader\M Reader.exe` (or `dist\M Reader.exe` with
 
 Use the **Export** button to save the current document as Markdown, PDF or HTML.
 
-> **Read-aloud voices:** M Reader first uses the natural voices installed in Windows
-> (**Settings → Time & language → Speech → Manage voices**). For languages Windows
-> doesn't offer (e.g. Slovak on managed PCs), install **eSpeak NG** and M Reader will
-> use it automatically:
+> **Read-aloud & OCR extras (optional):** run `install_extras.ps1` to add offline
+> read-aloud for more languages (**eSpeak NG**, e.g. Slovak) and reading of
+> **scanned/image PDFs** (**Tesseract OCR** + Slovak data):
 > ```powershell
-> winget install eSpeak-NG.eSpeak-NG
+> powershell -ExecutionPolicy Bypass -File install_extras.ps1
 > ```
-> eSpeak NG is offline and free; its voice is robotic but reads the language correctly.
+> M Reader first uses the natural Windows voices (**Settings → Time & language →
+> Speech → Manage voices**); for languages Windows lacks it falls back to eSpeak NG.
+> For PDFs with a text layer it reads the text directly; for scanned/image PDFs it
+> runs OCR automatically (if Tesseract is installed).
 
 > **PDF outline:** for PDFs, use the PDF viewer's own outline/bookmarks panel; the
 > sidebar **Contents** tab is used for Markdown and HTML documents.
@@ -135,6 +138,7 @@ python -m pip uninstall PySide6 Markdown Pygments PyMuPDF markdownify
 m-reader/
 ├─ m_reader.py        # the application
 ├─ install.ps1        # installer (deps + file associations + shortcut)
+├─ install_extras.ps1 # optional: eSpeak NG (TTS) + Tesseract OCR
 ├─ uninstall.ps1      # removes associations & shortcut
 ├─ build_exe.ps1      # builds a standalone .exe (PyInstaller)
 ├─ make_icon.ps1      # generates the app icon

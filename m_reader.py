@@ -22,7 +22,9 @@ import tempfile
 import unicodedata
 
 import markdown
-from PySide6.QtCore import Qt, QFileSystemWatcher, QLocale, QSettings, QUrl, QTimer
+from PySide6.QtCore import (
+    Qt, QFileSystemWatcher, QLocale, QSettings, QUrl, QTimer, Signal,
+)
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -106,6 +108,22 @@ def find_espeak():
     return shutil.which("espeak-ng")
 
 
+def find_tesseract():
+    """Nájde tesseract.exe (OCR pre skenované PDF). Vráti cestu alebo None."""
+    local = os.environ.get("LOCALAPPDATA", "")
+    candidates = [
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    ]
+    if local:
+        candidates.append(os.path.join(local, "Programs", "Tesseract-OCR",
+                                       "tesseract.exe"))
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    return shutil.which("tesseract")
+
+
 def github_slugify(value, separator="-"):
     """Vytvorí ID nadpisu rovnako ako GitHub, aby odkazy v obsahu (TOC)
     fungovali. Na rozdiel od predvoleného slugify v python-markdown
@@ -144,6 +162,8 @@ TRANSLATIONS = {
         "export_html": "To HTML",
         "read_aloud": "Read aloud",
         "stop_reading": "Stop reading",
+        "pdf_no_text": "This PDF has no text layer and OCR is unavailable — nothing to read.",
+        "ocr_running": "Reading text from images (OCR)…",
         "files": "Files",
         "outline": "Contents",
         "language_tip": "Language",
@@ -178,6 +198,8 @@ TRANSLATIONS = {
         "export_html": "Do HTML",
         "read_aloud": "Prečítať nahlas",
         "stop_reading": "Zastaviť čítanie",
+        "pdf_no_text": "Toto PDF nemá textovú vrstvu a OCR nie je dostupné — niet čo čítať.",
+        "ocr_running": "Načítavam text z obrázkov (OCR)…",
         "files": "Súbory",
         "outline": "Obsah",
         "language_tip": "Jazyk",
@@ -212,6 +234,8 @@ TRANSLATIONS = {
         "export_html": "В HTML",
         "read_aloud": "Озвучить",
         "stop_reading": "Остановить",
+        "pdf_no_text": "В этом PDF нет текстового слоя, OCR недоступен — нечего читать.",
+        "ocr_running": "Распознаю текст с изображений (OCR)…",
         "files": "Файлы",
         "outline": "Содержание",
         "language_tip": "Язык",
@@ -246,6 +270,8 @@ TRANSLATIONS = {
         "export_html": "A HTML",
         "read_aloud": "Leer en voz alta",
         "stop_reading": "Detener lectura",
+        "pdf_no_text": "Este PDF no tiene capa de texto y no hay OCR — nada que leer.",
+        "ocr_running": "Leyendo texto de las imágenes (OCR)…",
         "files": "Archivos",
         "outline": "Contenido",
         "language_tip": "Idioma",
@@ -574,6 +600,8 @@ class ReaderPage(QWebEnginePage):
 # --------------------------------------------------------------------------- #
 
 class MReader(QMainWindow):
+    _ocr_ready = Signal(str)   # výsledok OCR z vlákna na pozadí
+
     def __init__(self):
         super().__init__()
         self.settings = QSettings(ORG_NAME, APP_NAME)
@@ -602,6 +630,8 @@ class MReader(QMainWindow):
         self.espeak_path = find_espeak()
         self._espeak_proc = None
         self._espeak_tmp = None
+        self.tesseract_path = find_tesseract()   # OCR pre skenované PDF
+        self._ocr_ready.connect(self._on_ocr_ready)
 
         self._build_ui()
         self._restore_geometry()
@@ -990,10 +1020,79 @@ class MReader(QMainWindow):
     # ---- čítanie nahlas (TTS) ---------------------------------------------- #
     def speak_selection(self):
         """Prečíta označený text; ak nič nie je označené, číta od miesta
-        posledného kliknutia (kurzora), inak od prvého viditeľného odseku."""
+        posledného kliknutia (kurzora), inak od prvého viditeľného odseku.
+        Pri PDF vytiahne text priamo z dokumentu (prípadne cez OCR)."""
         if not (self.tts or self.espeak_path):
             return
-        self.view.page().runJavaScript(SPEAK_JS, self._speak_text)
+        if self.current_kind == "pdf":
+            self._speak_pdf()
+        else:
+            self.view.page().runJavaScript(SPEAK_JS, self._speak_text)
+
+    # ---- PDF: text z dokumentu / OCR --------------------------------------- #
+    def _speak_pdf(self):
+        text = self._pdf_text_layer()
+        if text:
+            self._speak_text(text)
+            return
+        # žiadna textová vrstva -> skenované PDF -> OCR (ak je dostupné)
+        if not (self.tesseract_path and self.current_file and fitz):
+            self.statusBar().showMessage(self.t("pdf_no_text"), 8000)
+            return
+        try:
+            import pytesseract  # noqa: F401
+        except ImportError:
+            self.statusBar().showMessage(self.t("pdf_no_text"), 8000)
+            return
+        self.statusBar().showMessage(self.t("ocr_running"), 0)
+        import threading
+        threading.Thread(target=self._ocr_worker,
+                         args=(self.current_file,), daemon=True).start()
+
+    def _pdf_text_layer(self):
+        if not (fitz and self.current_file):
+            return ""
+        doc = None
+        try:
+            doc = fitz.open(self.current_file)
+            parts = [p.get_text() for p in doc]
+            return "\n".join(parts).strip()
+        except Exception:
+            return ""
+        finally:
+            if doc is not None:
+                doc.close()
+
+    def _ocr_worker(self, path):
+        text = ""
+        try:
+            import io
+            import pytesseract
+            from PIL import Image
+            pytesseract.pytesseract.tesseract_cmd = self.tesseract_path
+            try:
+                langs = set(pytesseract.get_languages(config=""))
+            except Exception:
+                langs = set()
+            use = "+".join([l for l in ("slk", "eng") if l in langs]) or "eng"
+            doc = fitz.open(path)
+            out = []
+            for page in doc:
+                pix = page.get_pixmap(dpi=150)
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+                out.append(pytesseract.image_to_string(img, lang=use))
+            doc.close()
+            text = "\n".join(out).strip()
+        except Exception:
+            text = ""
+        self._ocr_ready.emit(text)
+
+    def _on_ocr_ready(self, text):
+        self.statusBar().clearMessage()
+        if text and text.strip():
+            self._speak_text(text)
+        else:
+            self.statusBar().showMessage(self.t("pdf_no_text"), 8000)
 
     def _speak_text(self, text):
         if not text or not text.strip():
