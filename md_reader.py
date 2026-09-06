@@ -23,10 +23,12 @@ from PySide6.QtCore import Qt, QFileSystemWatcher, QSettings, QUrl, QTimer
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFileDialog,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QSizePolicy,
     QSplitter,
     QTabWidget,
     QTreeWidget,
@@ -50,6 +52,103 @@ def github_slugify(value, separator="-"):
     value = re.sub(r"[^\w\s-]", "", value, flags=re.UNICODE)   # zahoď interpunkciu
     value = re.sub(r"\s", separator, value)                     # každá medzera -> pomlčka
     return value
+
+
+# --------------------------------------------------------------------------- #
+#  Lokalizácia UI                                                              #
+# --------------------------------------------------------------------------- #
+
+DEFAULT_LANG = "en"
+
+# poradie = poradie v prepínači; kód -> názov v danom jazyku
+LANGUAGES = [
+    ("en", "English"),
+    ("sk", "Slovenčina"),
+    ("ru", "Русский"),
+    ("es", "Español"),
+]
+
+TRANSLATIONS = {
+    "en": {
+        "open_file": "Open file",
+        "open_folder": "Open folder",
+        "dark_mode": "Dark mode",
+        "panel": "Panel",
+        "files": "Files",
+        "outline": "Contents",
+        "language_tip": "Language",
+        "dlg_open_md": "Open Markdown",
+        "dlg_open_folder": "Open folder",
+        "filter_md": "Markdown (*.md *.markdown *.mdown *.mkd *.txt);;All files (*.*)",
+        "read_error": "Error reading file",
+        "welcome": (
+            "<h1>MD Reader</h1>"
+            "<p>Open a Markdown file via <b>Open file</b> (Ctrl+O), "
+            "or a folder via <b>Open folder</b> (Ctrl+Shift+O).</p>"
+            "<p>You can also open <code>.md</code> files by double-clicking "
+            "them in Explorer.</p>"
+        ),
+    },
+    "sk": {
+        "open_file": "Otvoriť súbor",
+        "open_folder": "Otvoriť priečinok",
+        "dark_mode": "Tmavý režim",
+        "panel": "Panel",
+        "files": "Súbory",
+        "outline": "Obsah",
+        "language_tip": "Jazyk",
+        "dlg_open_md": "Otvoriť Markdown",
+        "dlg_open_folder": "Otvoriť priečinok",
+        "filter_md": "Markdown (*.md *.markdown *.mdown *.mkd *.txt);;Všetky súbory (*.*)",
+        "read_error": "Chyba pri čítaní súboru",
+        "welcome": (
+            "<h1>MD Reader</h1>"
+            "<p>Otvor Markdown súbor cez <b>Otvoriť súbor</b> (Ctrl+O), "
+            "alebo priečinok cez <b>Otvoriť priečinok</b> (Ctrl+Shift+O).</p>"
+            "<p>Súbory <code>.md</code> môžeš otvárať aj dvojklikom z Prieskumníka.</p>"
+        ),
+    },
+    "ru": {
+        "open_file": "Открыть файл",
+        "open_folder": "Открыть папку",
+        "dark_mode": "Тёмный режим",
+        "panel": "Панель",
+        "files": "Файлы",
+        "outline": "Содержание",
+        "language_tip": "Язык",
+        "dlg_open_md": "Открыть Markdown",
+        "dlg_open_folder": "Открыть папку",
+        "filter_md": "Markdown (*.md *.markdown *.mdown *.mkd *.txt);;Все файлы (*.*)",
+        "read_error": "Ошибка чтения файла",
+        "welcome": (
+            "<h1>MD Reader</h1>"
+            "<p>Откройте файл Markdown через <b>Открыть файл</b> (Ctrl+O), "
+            "или папку через <b>Открыть папку</b> (Ctrl+Shift+O).</p>"
+            "<p>Файлы <code>.md</code> также можно открывать двойным щелчком "
+            "в Проводнике.</p>"
+        ),
+    },
+    "es": {
+        "open_file": "Abrir archivo",
+        "open_folder": "Abrir carpeta",
+        "dark_mode": "Modo oscuro",
+        "panel": "Panel",
+        "files": "Archivos",
+        "outline": "Contenido",
+        "language_tip": "Idioma",
+        "dlg_open_md": "Abrir Markdown",
+        "dlg_open_folder": "Abrir carpeta",
+        "filter_md": "Markdown (*.md *.markdown *.mdown *.mkd *.txt);;Todos los archivos (*.*)",
+        "read_error": "Error al leer el archivo",
+        "welcome": (
+            "<h1>MD Reader</h1>"
+            "<p>Abre un archivo Markdown con <b>Abrir archivo</b> (Ctrl+O), "
+            "o una carpeta con <b>Abrir carpeta</b> (Ctrl+Shift+O).</p>"
+            "<p>También puedes abrir archivos <code>.md</code> haciendo doble "
+            "clic en el Explorador.</p>"
+        ),
+    },
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -270,6 +369,9 @@ class MdReader(QMainWindow):
         super().__init__()
         self.settings = QSettings(ORG_NAME, APP_NAME)
         self.dark = self.settings.value("dark", False, type=bool)
+        self.lang = self.settings.value("lang", DEFAULT_LANG)
+        if self.lang not in TRANSLATIONS:
+            self.lang = DEFAULT_LANG
         self.current_file = None
         self.current_dir = None
 
@@ -297,8 +399,8 @@ class MdReader(QMainWindow):
         self.panel = QTabWidget()
         self.panel.setMaximumWidth(320)
         self.panel.setMinimumWidth(160)
-        self.panel.addTab(self.sidebar, "Súbory")
-        self.panel.addTab(self.outline, "Obsah")
+        self.panel.addTab(self.sidebar, self.t("files"))
+        self.panel.addTab(self.outline, self.t("outline"))
 
         self.view = QWebEngineView()
         self.view.setPage(ReaderPage(self.view))
@@ -319,46 +421,85 @@ class MdReader(QMainWindow):
         self._render_welcome()
 
     def _build_toolbar(self):
-        tb = self.addToolBar("Hlavné")
+        tb = self.addToolBar("Main")
         tb.setMovable(False)
 
-        open_file = QAction("Otvoriť súbor", self)
-        open_file.setShortcut(QKeySequence.Open)
-        open_file.triggered.connect(self.open_file_dialog)
-        tb.addAction(open_file)
+        self.open_file_action = QAction(self)
+        self.open_file_action.setShortcut(QKeySequence.Open)
+        self.open_file_action.triggered.connect(self.open_file_dialog)
+        tb.addAction(self.open_file_action)
 
-        open_dir = QAction("Otvoriť priečinok", self)
-        open_dir.setShortcut("Ctrl+Shift+O")
-        open_dir.triggered.connect(self.open_dir_dialog)
-        tb.addAction(open_dir)
+        self.open_dir_action = QAction(self)
+        self.open_dir_action.setShortcut("Ctrl+Shift+O")
+        self.open_dir_action.triggered.connect(self.open_dir_dialog)
+        tb.addAction(self.open_dir_action)
 
         tb.addSeparator()
 
-        self.theme_action = QAction("Tmavý režim", self)
+        self.theme_action = QAction(self)
         self.theme_action.setCheckable(True)
         self.theme_action.setChecked(self.dark)
         self.theme_action.setShortcut("Ctrl+D")
         self.theme_action.triggered.connect(self.toggle_theme)
         tb.addAction(self.theme_action)
 
-        toggle_sidebar = QAction("Panel", self)
-        toggle_sidebar.setShortcut("Ctrl+B")
-        toggle_sidebar.triggered.connect(self._toggle_sidebar)
-        tb.addAction(toggle_sidebar)
+        self.panel_action = QAction(self)
+        self.panel_action.setShortcut("Ctrl+B")
+        self.panel_action.triggered.connect(self._toggle_sidebar)
+        tb.addAction(self.panel_action)
+
+        # pružná medzera, aby bol prepínač jazyka vpravo
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tb.addWidget(spacer)
+
+        self.lang_combo = QComboBox()
+        for code, name in LANGUAGES:
+            self.lang_combo.addItem(name, code)
+        idx = self.lang_combo.findData(self.lang)
+        if idx >= 0:
+            self.lang_combo.setCurrentIndex(idx)
+        self.lang_combo.currentIndexChanged.connect(self._on_language_change)
+        tb.addWidget(self.lang_combo)
+
+        self._retranslate()
+
+    # ---- lokalizácia ------------------------------------------------------- #
+    def t(self, key):
+        """Preklad UI reťazca podľa aktuálneho jazyka (fallback = angličtina)."""
+        lang = TRANSLATIONS.get(self.lang, TRANSLATIONS[DEFAULT_LANG])
+        return lang.get(key, TRANSLATIONS[DEFAULT_LANG].get(key, key))
+
+    def _retranslate(self):
+        self.open_file_action.setText(self.t("open_file"))
+        self.open_dir_action.setText(self.t("open_folder"))
+        self.theme_action.setText(self.t("dark_mode"))
+        self.panel_action.setText(self.t("panel"))
+        self.lang_combo.setToolTip(self.t("language_tip"))
+        self.panel.setTabText(0, self.t("files"))
+        self.panel.setTabText(1, self.t("outline"))
+        if not self.current_file:
+            self._render_welcome()
+
+    def _on_language_change(self, _index):
+        code = self.lang_combo.currentData()
+        if code and code != self.lang:
+            self.lang = code
+            self.settings.setValue("lang", code)
+            self._retranslate()
 
     # ---- otváranie --------------------------------------------------------- #
     def open_file_dialog(self):
         start = self.current_dir or os.path.expanduser("~")
         path, _ = QFileDialog.getOpenFileName(
-            self, "Otvoriť Markdown", start,
-            "Markdown (*.md *.markdown *.mdown *.mkd *.txt);;Všetky súbory (*.*)",
+            self, self.t("dlg_open_md"), start, self.t("filter_md"),
         )
         if path:
             self.load_file(path)
 
     def open_dir_dialog(self):
         start = self.current_dir or os.path.expanduser("~")
-        path = QFileDialog.getExistingDirectory(self, "Otvoriť priečinok", start)
+        path = QFileDialog.getExistingDirectory(self, self.t("dlg_open_folder"), start)
         if path:
             self.populate_sidebar(path)
 
@@ -387,7 +528,7 @@ class MdReader(QMainWindow):
             with open(path, "r", encoding="utf-8") as fh:
                 text = fh.read()
         except (OSError, UnicodeDecodeError) as exc:
-            self._render_html(f"<h1>Chyba pri čítaní súboru</h1><pre>{exc}</pre>")
+            self._render_html(f"<h1>{self.t('read_error')}</h1><pre>{exc}</pre>")
             return
 
         md = markdown.Markdown(
@@ -420,12 +561,7 @@ class MdReader(QMainWindow):
         self.view.setHtml(page, base_url)
 
     def _render_welcome(self):
-        self._render_html(
-            "<h1>MD Reader</h1>"
-            "<p>Otvor Markdown súbor cez <b>Otvoriť súbor</b> (Ctrl+O), "
-            "alebo priečinok cez <b>Otvoriť priečinok</b> (Ctrl+Shift+O).</p>"
-            "<p>Súbory <code>.md</code> môžeš otvárať aj dvojklikom z Prieskumníka.</p>"
-        )
+        self._render_html(self.t("welcome"))
 
     # ---- bočný panel ------------------------------------------------------- #
     def populate_sidebar(self, directory, select=None):

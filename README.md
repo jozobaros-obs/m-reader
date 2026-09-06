@@ -17,6 +17,8 @@ syntax highlighting, tables, a dark mode and a file sidebar.
 - 📄 **GitHub-style rendering** of Markdown (headings, tables, blockquotes, images, code).
 - 🎨 **Syntax highlighting** for code blocks (Pygments).
 - 🌗 **Light / dark theme** toggle (remembered between sessions).
+- 🌍 **Multi-language UI** — English (default), Slovak, Russian and Spanish, switchable
+  from the toolbar and remembered between sessions.
 - 🗂️ **Switchable sidebar** — flip between the **Files** in the current folder and a
   document **Outline** (table of contents), like a PDF reader. Click any heading to jump to it.
 - 🔗 **Table-of-contents links that actually work** — anchor links jump to the right
