@@ -1,4 +1,4 @@
-<#
+﻿<#
     M Reader – odinštalovanie. Odstráni asociácie, ProgID a zástupcu.
     Python knižnice ponecháva – tie môžeš odstrániť ručne cez pip.
 #>
@@ -40,4 +40,4 @@ $shell::SHChangeNotify(0x08000000, 0x0000, [System.IntPtr]::Zero, [System.IntPtr
 
 Write-Host "Hotovo. Asociácie a zástupca boli odstránené." -ForegroundColor Green
 Write-Host "Knižnice odstrániš (voliteľne) príkazom:" -ForegroundColor Yellow
-Write-Host "  python -m pip uninstall PySide6 Markdown Pygments PyMuPDF markdownify"
+Write-Host "  python -m pip uninstall PySide6 Markdown Pygments PyMuPDF markdownify langdetect pytesseract"

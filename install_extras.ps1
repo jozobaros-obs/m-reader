@@ -1,4 +1,4 @@
-<#
+﻿<#
     M Reader – voliteľné rozšírenia pre čítanie nahlas a OCR.
 
     Nainštaluje (cez winget, vyžaduje potvrdenie UAC):

@@ -1,4 +1,4 @@
-<#
+﻿<#
     Vygeneruje modernú ikonu aplikácie MD Reader (mdreader.ico).
     Dizajn: zaoblený štvorec s fialovo-indigovým gradientom a bielym
     Markdown symbolom ("M" + šípka dole). PNG sa zabalí do .ico

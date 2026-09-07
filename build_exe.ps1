@@ -1,4 +1,4 @@
-<#
+﻿<#
     Zostaví M Reader do samostatného .exe pomocou PyInstalleru.
     Výsledok nepotrebuje nainštalovaný Python.
 
@@ -19,13 +19,16 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 $IconPath  = Join-Path $ScriptDir "mdreader.ico"
 
 Write-Host "=== Build M Reader .exe ===" -ForegroundColor Cyan
 
 $python = (Get-Command python -ErrorAction SilentlyContinue).Source
-if (-not $python) { throw "Python sa nenašiel v PATH." }
+if (-not $python) {
+    throw "Python sa nenašiel v PATH. Spusti najprv install.ps1, ktorý ho v prípade potreby nainštaluje."
+}
+Write-Host "Python: $python"
 
 # ikona (ak chýba, vygeneruj)
 if (-not (Test-Path $IconPath)) {
@@ -35,9 +38,12 @@ if (-not (Test-Path $IconPath)) {
 
 Write-Host "Inštalujem závislosti + PyInstaller..." -ForegroundColor Cyan
 & $python -m pip install -r (Join-Path $ScriptDir "requirements.txt") | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "pip install závislostí zlyhal." }
 & $python -m pip install --upgrade pyinstaller | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "pip install pyinstaller zlyhal." }
 
-$args = @(
+# pozn.: nepomenovať $args – to je automatická premenná PowerShellu
+$piArgs = @(
     "--noconfirm", "--clean",
     "--windowed",                       # bez okna konzoly
     "--name", "M Reader",
@@ -45,13 +51,13 @@ $args = @(
     "--add-data", "$IconPath;.",        # ikona dostupná za behu
     "--collect-all", "PySide6"          # istota, že sa pribalí QtWebEngine
 )
-if ($OneFile) { $args += "--onefile" }
-$args += (Join-Path $ScriptDir "m_reader.py")
+if ($OneFile) { $piArgs += "--onefile" }
+$piArgs += (Join-Path $ScriptDir "m_reader.py")
 
 Write-Host "`nSpúšťam PyInstaller (chvíľu to potrvá)..." -ForegroundColor Cyan
 Push-Location $ScriptDir
 try {
-    & $python -m PyInstaller @args
+    & $python -m PyInstaller @piArgs
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller zlyhal." }
 } finally {
     Pop-Location

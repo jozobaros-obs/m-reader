@@ -21,10 +21,11 @@ Thumbs.db
 Desktop.ini
 .vscode/
 .idea/
+.claude/
 
 # Temp (all underscore-prefixed scratch files)
 _*.log
 _*.png
 
 # Personal / local test documents (not part of the project)
-Python_Ultimate_Exam_Reference.md
+Python_Ultimate_Exam_Reference.*

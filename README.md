@@ -39,7 +39,9 @@ convert between formats, search the text, and set it as your default viewer.
 ## Requirements
 
 - Windows 10 / 11
-- [Python 3.9+](https://www.python.org/downloads/) on `PATH`
+- Python 3.9+ — **optional**: if you don't have it, the installer downloads it
+  from [python.org](https://www.python.org/downloads/) and installs it for you
+  (per-user, no admin rights needed)
 
 Dependencies (installed automatically):
 
@@ -63,16 +65,38 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 
 The installer (no admin rights needed, everything under `HKCU`):
 
-1. Installs the Python dependencies from `requirements.txt`.
-2. Generates the app icon.
-3. Creates a no-console launcher (`run_hidden.vbs`).
-4. Registers `.md`, `.markdown`, `.html`, `.htm` and `.pdf` to open with M Reader.
-5. Adds an **M Reader** shortcut to the Start Menu.
+1. Finds a usable Python — and if there isn't one, downloads and installs it
+   from python.org for the current user only.
+2. Installs the Python dependencies from `requirements.txt`.
+3. Generates the app icon.
+4. Builds a no-console launcher (`M Reader.exe`, or `run_hidden.vbs` as fallback).
+5. Registers `.md`, `.markdown`, `.html`, `.htm` and `.pdf` to open with M Reader.
+6. Adds an **M Reader** shortcut to the Start Menu.
+
+Installer switches:
+
+| Switch | Effect |
+|--------|--------|
+| `-Yes` | Don't ask before installing Python (for scripted / unattended runs) |
+| `-NoPythonInstall` | Never install Python; fail with instructions if none is found |
+| `-PythonVersion <v>` | Which Python to download (default `3.13.15`) |
+
+> **The Microsoft Store version of Python will not work**, and the installer
+> deliberately skips it. Its `site-packages` sits under a ~145-character path
+> (`…\Packages\PythonSoftwareFoundation.Python.3.13_…\LocalCache\…`), and because
+> PySide6 ships deeply nested files, pip blows past the Windows 260-character
+> path limit with `OSError: [Errno 2] No such file or directory` unless long-path
+> support is enabled (which needs admin rights). The installer therefore installs
+> a regular Python into `%LOCALAPPDATA%\Programs\Python`, where the path is short.
 
 > **Note on the default app:** Windows protects the default-app choice, so it may
 > ask you to confirm once. If a file doesn't open in M Reader automatically:
 > right-click it → **Open with** → **Choose another app** → pick **M Reader** and
 > tick *Always use this app*.
+
+> **Keep the project folder where it is.** The launcher and the file associations
+> point at `pythonw.exe` and `m_reader.py` by absolute path. If you move or
+> rename the folder, just run `install.ps1` again.
 
 ### Alternative: standalone `.exe`
 
@@ -136,15 +160,26 @@ Removes the file associations and the Start Menu shortcut. To also remove the
 Python packages:
 
 ```powershell
-python -m pip uninstall PySide6 Markdown Pygments PyMuPDF markdownify
+python -m pip uninstall PySide6 Markdown Pygments PyMuPDF markdownify langdetect pytesseract
 ```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `pip install` fails with `OSError: [Errno 2] No such file or directory` and a hint about long paths | You're on the Microsoft Store Python. Run `install.ps1` — it skips that one and installs a proper Python. |
+| Installer aborts with `Unexpected token` / garbled accented characters | The `.ps1` files must be saved as **UTF-8 with BOM**; Windows PowerShell 5.1 otherwise reads them as ANSI. |
+| Installer says it can't find Python right after installing it | Close the terminal, open a new one and run `install.ps1` again — the new `PATH` only reaches fresh processes. |
+| `pip install` fails with *Access is denied* | Your Python lives in a system-wide location. Either reinstall it per-user, or run `python -m pip install --user -r requirements.txt`. |
+| Nothing opens on double-click | Right-click → **Open with** → **Choose another app** → **M Reader** → *Always use this app*. |
+| Leftover `.venv\` folder in the project | Older versions of the installer created one. It's unused now — `Remove-Item -Recurse -Force .venv` frees ~700 MB. |
 
 ## Project structure
 
 ```
 m-reader/
 ├─ m_reader.py        # the application
-├─ install.ps1        # installer (deps + file associations + shortcut)
+├─ install.ps1        # installer (Python + deps + file associations + shortcut)
 ├─ install_extras.ps1 # optional: Tesseract OCR for scanned PDFs
 ├─ uninstall.ps1      # removes associations & shortcut
 ├─ build_exe.ps1      # builds a standalone .exe (PyInstaller)
