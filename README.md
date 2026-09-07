@@ -16,6 +16,9 @@ convert between formats, search the text, and set it as your default viewer.
 
 - 📄 **Reads Markdown, HTML and PDF** in one window (GitHub-style Markdown rendering,
   native PDF viewer, direct HTML rendering).
+- 🗂️ **Tabs** — every document opens in its own tab (like a browser or Notepad++).
+  Opening a file from Explorer reuses the running window and adds a **new tab**
+  instead of launching another copy of the app (single-instance).
 - 🔁 **Convert between formats** — export any open document **to Markdown, PDF or HTML**.
 - 🔎 **Full-text search** in the document (Ctrl+F).
 - 🔊 **Read aloud (offline TTS)** — reads the selected text, or starts from where you
@@ -91,8 +94,9 @@ The result lands in `dist\M Reader\M Reader.exe` (or `dist\M Reader.exe` with
 
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl+O` | Open file |
+| `Ctrl+O` | Open file (in a new tab) |
 | `Ctrl+Shift+O` | Open folder |
+| `Ctrl+W` | Close current tab |
 | `Ctrl+F` | Find in text |
 | `Ctrl+R` | Read aloud (selection, or from where you're reading) |
 | `Ctrl` `+` / `Ctrl` `-` | Zoom text in / out (also `Ctrl` + mouse wheel) |

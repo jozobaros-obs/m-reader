@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 # voliteľné závislosti pre konverziu PDF <-> ostatné formáty
 try:
@@ -154,6 +155,7 @@ TRANSLATIONS = {
         "zoom_in": "Zoom in",
         "zoom_out": "Zoom out",
         "zoom_reset": "Reset zoom",
+        "new_tab": "New tab",
         "pdf_no_text": "This PDF has no text layer and OCR is unavailable — nothing to read.",
         "ocr_running": "Reading text from images (OCR)…",
         "files": "Files",
@@ -193,6 +195,7 @@ TRANSLATIONS = {
         "zoom_in": "Priblížiť",
         "zoom_out": "Oddialiť",
         "zoom_reset": "Pôvodná veľkosť",
+        "new_tab": "Nová záložka",
         "pdf_no_text": "Toto PDF nemá textovú vrstvu a OCR nie je dostupné — niet čo čítať.",
         "ocr_running": "Načítavam text z obrázkov (OCR)…",
         "files": "Súbory",
@@ -232,6 +235,7 @@ TRANSLATIONS = {
         "zoom_in": "Увеличить",
         "zoom_out": "Уменьшить",
         "zoom_reset": "Сбросить масштаб",
+        "new_tab": "Новая вкладка",
         "pdf_no_text": "В этом PDF нет текстового слоя, OCR недоступен — нечего читать.",
         "ocr_running": "Распознаю текст с изображений (OCR)…",
         "files": "Файлы",
@@ -271,6 +275,7 @@ TRANSLATIONS = {
         "zoom_in": "Acercar",
         "zoom_out": "Alejar",
         "zoom_reset": "Restablecer zoom",
+        "new_tab": "Nueva pestaña",
         "pdf_no_text": "Este PDF no tiene capa de texto y no hay OCR — nada que leer.",
         "ocr_running": "Leyendo texto de las imágenes (OCR)…",
         "files": "Archivos",
@@ -620,13 +625,40 @@ class ReaderPage(QWebEnginePage):
 
 
 # --------------------------------------------------------------------------- #
+#  Jedna záložka = jeden dokument (vlastné zobrazenie + stav)                  #
+# --------------------------------------------------------------------------- #
+
+class DocTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.file = None          # absolútna cesta k dokumentu (alebo None)
+        self.kind = None          # "md" / "html" / "pdf" / None (uvítacia)
+        self.body_html = ""       # renderované telo (pre export MD -> HTML)
+        self.pending_scroll = None    # obnovenie pozície po prekreslení
+        self.toc = []             # toc_tokens pre Markdown obsah (bočný panel)
+        self.headings = []        # ploché nadpisy pre HTML obsah
+        self.filters_installed = False   # už sú nainštalované event-filtre?
+
+        self.view = QWebEngineView()
+        self.view.setPage(ReaderPage(self.view))
+        s = self.view.settings()
+        s.setAttribute(QWebEngineSettings.WebAttribute.PdfViewerEnabled, True)
+        s.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self.view)
+
+
+# --------------------------------------------------------------------------- #
 #  Hlavné okno                                                                 #
 # --------------------------------------------------------------------------- #
 
 class MReader(QMainWindow):
     _ocr_ready = Signal(str)      # výsledok OCR / textovej vrstvy z vlákna
     _status_signal = Signal(str)  # zobrazenie správy v stavovom riadku z vlákna
-    _md_ready = Signal(str, str, object)  # (cesta, telo HTML, toc_tokens)
+    _md_ready = Signal(object, str, str, object)  # (tab, cesta, telo, toc_tokens)
 
     def __init__(self):
         super().__init__()
@@ -635,14 +667,10 @@ class MReader(QMainWindow):
         self.lang = self.settings.value("lang", DEFAULT_LANG)
         if self.lang not in TRANSLATIONS:
             self.lang = DEFAULT_LANG
-        self.current_file = None
-        self.current_dir = None
-        self.current_kind = None
-        self.current_body_html = ""   # renderované telo (pre export MD -> HTML)
-        self._pending_scroll = None   # pozícia rolovania na obnovenie po prekreslení
+        self.current_dir = None       # priečinok zobrazený v bočnom paneli
         self.zoom = float(self.settings.value("zoom", 1.0))   # priblíženie textu
         self._reading = False         # práve prebieha čítanie nahlas?
-        self._wheel_filter_installed = False
+        self._local_server = None     # server pre režim jednej inštancie
 
         self.watcher = QFileSystemWatcher(self)
         self.watcher.fileChanged.connect(self._on_file_changed)
@@ -664,6 +692,63 @@ class MReader(QMainWindow):
         self._build_ui()
         self._restore_geometry()
 
+    # ---- prístup k aktuálnej záložke --------------------------------------- #
+    # Väčšina metód pracuje s „aktuálnym" dokumentom cez tieto vlastnosti, takže
+    # ostávajú takmer nezmenené aj po prechode na viac záložiek.
+    @property
+    def cur(self):
+        tabs = getattr(self, "tabs", None)
+        return tabs.currentWidget() if tabs is not None else None
+
+    @property
+    def view(self):
+        tab = self.cur
+        return tab.view if tab is not None else None
+
+    @property
+    def current_file(self):
+        tab = self.cur
+        return tab.file if tab is not None else None
+
+    @current_file.setter
+    def current_file(self, value):
+        tab = self.cur
+        if tab is not None:
+            tab.file = value
+
+    @property
+    def current_kind(self):
+        tab = self.cur
+        return tab.kind if tab is not None else None
+
+    @current_kind.setter
+    def current_kind(self, value):
+        tab = self.cur
+        if tab is not None:
+            tab.kind = value
+
+    @property
+    def current_body_html(self):
+        tab = self.cur
+        return tab.body_html if tab is not None else ""
+
+    @current_body_html.setter
+    def current_body_html(self, value):
+        tab = self.cur
+        if tab is not None:
+            tab.body_html = value
+
+    @property
+    def _pending_scroll(self):
+        tab = self.cur
+        return tab.pending_scroll if tab is not None else None
+
+    @_pending_scroll.setter
+    def _pending_scroll(self, value):
+        tab = self.cur
+        if tab is not None:
+            tab.pending_scroll = value
+
     # ---- UI ---------------------------------------------------------------- #
     def _build_ui(self):
         self.setWindowTitle(APP_NAME)
@@ -684,19 +769,18 @@ class MReader(QMainWindow):
         self.panel.addTab(self.sidebar, self.t("files"))
         self.panel.addTab(self.outline, self.t("outline"))
 
-        self.view = QWebEngineView()
-        self.view.setPage(ReaderPage(self.view))
-        s = self.view.settings()
-        s.setAttribute(QWebEngineSettings.WebAttribute.PdfViewerEnabled, True)
-        s.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
-        self.view.page().pdfPrintingFinished.connect(self._on_pdf_printed)
-        self.view.loadFinished.connect(self._on_load_finished)
-        # kliknutie v texte sa hlási cez zmenu titulku -> skok čítania TTS
-        self.view.titleChanged.connect(self._on_view_title)
+        # dokumenty v záložkách (ako v prehliadači / Notepad++)
+        self.tabs = QTabWidget()
+        self.tabs.setTabsClosable(True)
+        self.tabs.setMovable(True)
+        self.tabs.setDocumentMode(True)
+        self.tabs.setElideMode(Qt.ElideRight)
+        self.tabs.tabCloseRequested.connect(self._close_tab)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(self.panel)
-        self.splitter.addWidget(self.view)
+        self.splitter.addWidget(self.tabs)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setSizes([240, 1120])
 
@@ -707,16 +791,15 @@ class MReader(QMainWindow):
         layout.addWidget(self.splitter)
         self.setCentralWidget(container)
 
-        # kompaktný vyhľadávací panel „pláva" nad zobrazením (pravý horný roh)
+        # kompaktný vyhľadávací panel „pláva" nad aktuálnym zobrazením
         self._build_find_bar()
-        self.view.installEventFilter(self)   # prepolohuj panel pri zmene veľkosti
 
         self._build_toolbar()
-        self._render_welcome()
+        self._new_tab(welcome=True)   # úvodná (uvítacia) záložka
 
     def _build_find_bar(self):
-        # plávajúci panel – dieťa zobrazenia, aby sa vykreslil nad dokumentom
-        self.find_bar = QWidget(self.view)
+        # plávajúci panel – pri zobrazení sa pripne k aktuálnemu zobrazeniu
+        self.find_bar = QWidget()
         self.find_bar.setObjectName("mrFindBar")
         h = QHBoxLayout(self.find_bar)
         h.setContentsMargins(8, 6, 8, 6)
@@ -763,12 +846,13 @@ class MReader(QMainWindow):
             f"#mrFindBar QToolButton:hover {{ background: {bd}; }}")
 
     def _position_find_bar(self):
-        """Umiestni panel do pravého horného rohu zobrazenia."""
-        if not getattr(self, "find_bar", None):
+        """Umiestni panel do pravého horného rohu aktuálneho zobrazenia."""
+        view = self.view
+        if not getattr(self, "find_bar", None) or view is None:
             return
         self.find_bar.adjustSize()
         margin = 14
-        x = self.view.width() - self.find_bar.width() - margin
+        x = view.width() - self.find_bar.width() - margin
         self.find_bar.move(max(margin, x), margin)
 
     def _build_toolbar(self):
@@ -835,6 +919,13 @@ class MReader(QMainWindow):
         self._zoom_in_alt.setShortcut("Ctrl+=")
         self._zoom_in_alt.triggered.connect(lambda: self._zoom(0.1))
         self.addAction(self._zoom_in_alt)
+
+        # Ctrl+W – zatvor aktuálnu záložku
+        self._close_tab_action = QAction(self)
+        self._close_tab_action.setShortcut("Ctrl+W")
+        self._close_tab_action.triggered.connect(
+            lambda: self._close_tab(self.tabs.currentIndex()))
+        self.addAction(self._close_tab_action)
 
         tb.addSeparator()
 
@@ -916,49 +1007,150 @@ class MReader(QMainWindow):
             self.populate_sidebar(path)
 
     def load_file(self, path):
+        """Otvorí súbor v novej záložke (alebo prepne na už otvorenú)."""
         path = os.path.abspath(path)
         if not os.path.isfile(path):
             return
+        for i in range(self.tabs.count()):
+            if self.tabs.widget(i).file == path:
+                self.tabs.setCurrentIndex(i)
+                return
+        tab = self.cur
+        # prázdnu uvítaciu záložku znovupoužijeme, inak otvoríme novú
+        if tab is None or tab.file is not None:
+            tab = self._new_tab()
+        self._load_into_tab(tab, path)
 
-        if self.current_file and self.current_file in self.watcher.files():
-            self.watcher.removePath(self.current_file)
-        self.watcher.addPath(path)
+    def _load_into_tab(self, tab, path):
+        path = os.path.abspath(path)
+        if not os.path.isfile(path):
+            return
+        old = tab.file
+        if old and old != path and not self._file_open_elsewhere(old, tab):
+            if old in self.watcher.files():
+                self.watcher.removePath(old)
+        if path not in self.watcher.files():
+            self.watcher.addPath(path)
 
-        self.current_file = path
-        self.current_kind = file_kind(path)
+        tab.file = path
+        tab.kind = file_kind(path)
+        tab.toc = []
+        tab.headings = []
+
         new_dir = os.path.dirname(path)
         if new_dir != self.current_dir:
             self.populate_sidebar(new_dir, select=path)
-        else:
+        elif tab is self.cur:
             self._highlight_sidebar(path)
 
-        self.outline.clear()
-        if self.current_kind == "md":
-            self._render_markdown(path)
-        elif self.current_kind == "html":
-            self.view.setUrl(QUrl.fromLocalFile(path))
-        elif self.current_kind == "pdf":
+        if tab is self.cur:
+            self.outline.clear()
+        if tab.kind == "md":
+            self._render_markdown(tab)
+        elif tab.kind == "html":
+            tab.view.setUrl(QUrl.fromLocalFile(path))
+        elif tab.kind == "pdf":
             # PDF prehliadač má vlastný (funkčný) obsah – náš zbytočný TOC
             # nezobrazujeme, prepneme na záložku Súbory.
-            self.panel.setCurrentIndex(0)
-            self.view.setUrl(QUrl.fromLocalFile(path))
+            if tab is self.cur:
+                self.panel.setCurrentIndex(0)
+            tab.view.setUrl(QUrl.fromLocalFile(path))
 
-        self.setWindowTitle(f"{os.path.basename(path)} — {APP_NAME}")
+        self._set_tab_title(tab)
+        self._update_window_title()
+
+    def _file_open_elsewhere(self, path, exclude_tab):
+        for i in range(self.tabs.count()):
+            t = self.tabs.widget(i)
+            if t is not exclude_tab and t.file == path:
+                return True
+        return False
+
+    # ---- záložky ----------------------------------------------------------- #
+    def _new_tab(self, welcome=False):
+        tab = DocTab()
+        tab.view.loadFinished.connect(
+            lambda ok, t=tab: self._on_load_finished(t, ok))
+        tab.view.page().pdfPrintingFinished.connect(self._on_pdf_printed)
+        tab.view.titleChanged.connect(
+            lambda title, t=tab: self._on_view_title(t, title))
+        idx = self.tabs.addTab(tab, self.t("new_tab"))
+        self.tabs.setCurrentIndex(idx)
+        if welcome:
+            self._render_welcome_tab(tab)
+        return tab
+
+    def _close_tab(self, index):
+        tab = self.tabs.widget(index)
+        if tab is None:
+            return
+        if tab.file and not self._file_open_elsewhere(tab.file, tab):
+            if tab.file in self.watcher.files():
+                self.watcher.removePath(tab.file)
+        self.tabs.removeTab(index)
+        tab.deleteLater()
+        if self.tabs.count() == 0:
+            self._new_tab(welcome=True)   # vždy nechaj aspoň jednu záložku
+
+    def _on_tab_changed(self, _index):
+        tab = self.cur
+        if tab is None:
+            self.outline.clear()
+            self.setWindowTitle(APP_NAME)
+            return
+        # obsah (bočný panel) podľa typu dokumentu aktuálnej záložky
+        if tab.kind == "md":
+            self._populate_outline(tab.toc)
+        elif tab.kind == "html" and tab.headings:
+            self._populate_outline_flat(tab.headings)
+        else:
+            self.outline.clear()
+        # bočný panel súborov + priečinok
+        if tab.file:
+            directory = os.path.dirname(tab.file)
+            if directory != self.current_dir:
+                self.populate_sidebar(directory, select=tab.file)
+            else:
+                self._highlight_sidebar(tab.file)
+        tab.view.setZoomFactor(self.zoom)
+        self._update_window_title()
+        # vyhľadávací panel nech sleduje aktuálne zobrazenie
+        if getattr(self, "find_bar", None) and self.find_bar.isVisible():
+            self.find_bar.setParent(tab.view)
+            self._position_find_bar()
+            self.find_bar.show()
+            self.find_bar.raise_()
+
+    def _set_tab_title(self, tab):
+        idx = self.tabs.indexOf(tab)
+        if idx < 0:
+            return
+        name = os.path.basename(tab.file) if tab.file else self.t("new_tab")
+        self.tabs.setTabText(idx, name)
+        self.tabs.setTabToolTip(idx, tab.file or "")
+
+    def _update_window_title(self):
+        tab = self.cur
+        if tab and tab.file:
+            self.setWindowTitle(f"{os.path.basename(tab.file)} — {APP_NAME}")
+        else:
+            self.setWindowTitle(APP_NAME)
 
     # ---- renderovanie ------------------------------------------------------ #
-    def _render_markdown(self, path):
+    def _render_markdown(self, tab):
         try:
-            with open(path, "r", encoding="utf-8") as fh:
+            with open(tab.file, "r", encoding="utf-8") as fh:
                 text = fh.read()
         except (OSError, UnicodeDecodeError) as exc:
-            self._render_html(f"<h1>{self.t('read_error')}</h1><pre>{exc}</pre>")
+            self._render_html_into(
+                tab.view, f"<h1>{self.t('read_error')}</h1><pre>{exc}</pre>")
             return
         # Konverzia Markdownu (najmä pri veľkých súboroch) beží na pozadí,
         # aby aplikácia počas renderovania nezamrzla.
-        threading.Thread(target=self._md_worker, args=(path, text),
+        threading.Thread(target=self._md_worker, args=(tab, tab.file, text),
                          daemon=True).start()
 
-    def _md_worker(self, path, text):
+    def _md_worker(self, tab, path, text):
         try:
             md = markdown.Markdown(
                 extensions=["extra", "codehilite", "sane_lists", "toc",
@@ -973,14 +1165,21 @@ class MReader(QMainWindow):
         except Exception as exc:   # noqa: BLE001 – zobraz chybu namiesto pádu
             body = f"<h1>{self.t('read_error')}</h1><pre>{exc}</pre>"
             toc = []
-        self._md_ready.emit(path, body, toc)
+        self._md_ready.emit(tab, path, body, toc)
 
-    def _on_md_ready(self, path, body, toc):
-        if path != self.current_file:
-            return   # medzičasom sa otvoril iný súbor – zahoď zastaraný výsledok
-        self.current_body_html = body
-        self._populate_outline(toc)
-        self._render_html(body, base_dir=os.path.dirname(path))
+    def _on_md_ready(self, tab, path, body, toc):
+        try:
+            if self.tabs.indexOf(tab) < 0:
+                return   # záložka bola medzičasom zatvorená
+        except RuntimeError:
+            return
+        if tab.file != path:
+            return   # záložka sa medzičasom zmenila – zahoď zastaraný výsledok
+        tab.body_html = body
+        tab.toc = toc
+        if tab is self.cur:
+            self._populate_outline(toc)
+        self._render_html_into(tab.view, body, base_dir=os.path.dirname(path))
 
     def _build_page(self, content):
         return HTML_TEMPLATE.format(
@@ -991,14 +1190,29 @@ class MReader(QMainWindow):
             script=ANCHOR_JS,
         )
 
-    def _render_html(self, content, base_dir=None):
+    def _render_html_into(self, view, content, base_dir=None):
         page = self._build_page(content)
         base_url = QUrl.fromLocalFile(base_dir + os.sep) if base_dir else QUrl()
-        self.view.setHtml(page, base_url)
+        view.setHtml(page, base_url)
+
+    def _render_html(self, content, base_dir=None):
+        """Vykreslí do aktuálneho zobrazenia."""
+        if self.view is not None:
+            self._render_html_into(self.view, content, base_dir)
+
+    def _render_welcome_tab(self, tab):
+        tab.file = None
+        tab.kind = None
+        tab.toc = []
+        tab.headings = []
+        tab.body_html = self.t("welcome")
+        self._render_html_into(tab.view, self.t("welcome"))
+        self._set_tab_title(tab)
 
     def _render_welcome(self):
-        self.current_body_html = self.t("welcome")
-        self._render_html(self.t("welcome"))
+        tab = self.cur
+        if tab is not None:
+            self._render_welcome_tab(tab)
 
     # ---- bočný panel: súbory ----------------------------------------------- #
     def populate_sidebar(self, directory, select=None):
@@ -1080,40 +1294,49 @@ class MReader(QMainWindow):
         )
         self.view.page().runJavaScript(js)
 
-    def _on_load_finished(self, ok):
+    def _on_load_finished(self, tab, ok):
+        view = tab.view
         # aplikuj uložené priblíženie na každú načítanú stránku
-        self.view.setZoomFactor(self.zoom)
-        # zachyť Ctrl+koliesko myši pre plynulé priblíženie (vnútorný widget
-        # QWebEngineView vznikne až po prvom načítaní)
-        if not self._wheel_filter_installed:
-            fp = self.view.focusProxy()
-            if fp is not None:
-                fp.installEventFilter(self)
-                self._wheel_filter_installed = True
+        view.setZoomFactor(self.zoom)
+        # event-filtre: resize (poloha find baru) a Ctrl+koliesko (zoom).
+        # Vnútorný widget (focusProxy) vznikne až po prvom načítaní.
+        if not tab.filters_installed:
+            view.installEventFilter(self)
+            tab.filters_installed = True
+        fp = view.focusProxy()
+        if fp is not None and not fp.property("mrWheelFilter"):
+            fp.installEventFilter(self)
+            fp.setProperty("mrWheelFilter", True)
         if not ok:
             return
         # sleduj kliknutia (kurzor) pre čítanie od pozície – md aj html
-        if self.current_kind in ("md", "html"):
-            self.view.page().runJavaScript(CARET_TRACK_JS)
+        if tab.kind in ("md", "html"):
+            view.page().runJavaScript(CARET_TRACK_JS)
         # pre HTML súbory zostavíme obsah až po načítaní stránky
-        if self.current_kind == "html":
-            self.view.page().runJavaScript(OUTLINE_JS, self._apply_html_outline)
+        if tab.kind == "html":
+            view.page().runJavaScript(
+                OUTLINE_JS, lambda res, t=tab: self._apply_html_outline(t, res))
         # obnov pozíciu rolovania po prekreslení (napr. po zmene témy)
-        if self._pending_scroll:
-            y = self._pending_scroll
-            self._pending_scroll = None
-            self.view.page().runJavaScript(f"window.scrollTo(0, {y});")
+        if tab.pending_scroll:
+            y = tab.pending_scroll
+            tab.pending_scroll = None
+            view.page().runJavaScript(f"window.scrollTo(0, {y});")
 
-    def _apply_html_outline(self, result):
+    def _apply_html_outline(self, tab, result):
         try:
             headings = json.loads(result) if result else []
         except (ValueError, TypeError):
             headings = []
-        if headings:
+        tab.headings = headings
+        if headings and tab is self.cur:
             self._populate_outline_flat(headings)
 
     # ---- vyhľadávanie ------------------------------------------------------ #
     def _show_find(self):
+        view = self.view
+        if view is None:
+            return
+        self.find_bar.setParent(view)
         self._position_find_bar()
         self.find_bar.show()
         self.find_bar.raise_()
@@ -1122,8 +1345,9 @@ class MReader(QMainWindow):
 
     def _hide_find(self):
         self.find_bar.hide()
-        self.view.page().findText("")   # zruší zvýraznenie
-        self.view.setFocus()
+        if self.view is not None:
+            self.view.page().findText("")   # zruší zvýraznenie
+            self.view.setFocus()
 
     def _find(self, backward):
         text = self.find_input.text()
@@ -1275,23 +1499,27 @@ class MReader(QMainWindow):
             active.add(S.Synthesizing)
         self._reading = state in active
 
-    def _on_view_title(self, title):
+    def _on_view_title(self, tab, title):
         """Kliknutie v texte (signalizované cez titulok stránky). Ak práve
         prebieha čítanie, TTS preskočí na miesto kliknutia (kurzor)."""
         if not (title and title.startswith("mrjump:")):
             return
-        if self._reading and self.tts:
-            self.view.page().runJavaScript(SPEAK_JS, self._speak_text)
+        if tab is self.cur and self._reading and self.tts:
+            tab.view.page().runJavaScript(SPEAK_JS, self._speak_text)
 
     # ---- priblíženie (veľkosť písma) --------------------------------------- #
+    def _apply_zoom_all(self):
+        for i in range(self.tabs.count()):
+            self.tabs.widget(i).view.setZoomFactor(self.zoom)
+
     def _zoom(self, step):
         self.zoom = max(0.5, min(3.0, round(self.zoom + step, 2)))
-        self.view.setZoomFactor(self.zoom)
+        self._apply_zoom_all()
         self.settings.setValue("zoom", self.zoom)
 
     def _zoom_reset(self):
         self.zoom = 1.0
-        self.view.setZoomFactor(1.0)
+        self._apply_zoom_all()
         self.settings.setValue("zoom", 1.0)
 
     def eventFilter(self, obj, event):
@@ -1384,27 +1612,40 @@ class MReader(QMainWindow):
         self.dark = self.theme_action.isChecked()
         self.settings.setValue("dark", self.dark)
         self._style_find_bar()
-        if self.current_kind == "md" and self.current_file:
-            # najprv zisti aktuálnu pozíciu rolovania, potom prekresli a obnov ju
-            self.view.page().runJavaScript("window.scrollY", self._rerender_keep_scroll)
-        elif not self.current_file:
-            self._render_welcome()
+        # prekresli všetky záložky s vlastným HTML (md / uvítacia) do novej témy;
+        # používame uložené telo, takže netreba znova parsovať Markdown
+        for i in range(self.tabs.count()):
+            tab = self.tabs.widget(i)
+            if tab.kind == "html" or (tab.kind == "pdf"):
+                continue   # HTML/PDF dokumenty si nesú vlastný štýl
+            if tab is self.cur and tab.body_html:
+                tab.view.page().runJavaScript(
+                    "window.scrollY",
+                    lambda y, t=tab: self._rerender_theme(t, y))
+            elif tab.body_html:
+                base = os.path.dirname(tab.file) if tab.file else None
+                self._render_html_into(tab.view, tab.body_html, base_dir=base)
 
-    def _rerender_keep_scroll(self, scroll_y):
+    def _rerender_theme(self, tab, scroll_y):
         try:
-            self._pending_scroll = int(float(scroll_y or 0))
+            tab.pending_scroll = int(float(scroll_y or 0))
         except (TypeError, ValueError):
-            self._pending_scroll = 0
-        self._render_markdown(self.current_file)
+            tab.pending_scroll = 0
+        base = os.path.dirname(tab.file) if tab.file else None
+        self._render_html_into(tab.view, tab.body_html, base_dir=base)
 
     # ---- auto-reload ------------------------------------------------------- #
     def _on_file_changed(self, path):
         def reload():
-            if os.path.isfile(path):
-                if path not in self.watcher.files():
-                    self.watcher.addPath(path)
-                if path == self.current_file:
-                    self.load_file(path)
+            if not os.path.isfile(path):
+                return
+            if path not in self.watcher.files():
+                self.watcher.addPath(path)
+            # znovunačítaj záložky, ktoré tento súbor zobrazujú (na mieste)
+            for i in range(self.tabs.count()):
+                tab = self.tabs.widget(i)
+                if tab.file == path:
+                    self._load_into_tab(tab, path)
         QTimer.singleShot(120, reload)
 
     # ---- geometria okna ---------------------------------------------------- #
@@ -1418,6 +1659,31 @@ class MReader(QMainWindow):
     def closeEvent(self, event):
         self.settings.setValue("geometry", self.saveGeometry())
         super().closeEvent(event)
+
+    # ---- režim jednej inštancie -------------------------------------------- #
+    def _handle_new_connection(self):
+        """Ďalšia spustená kópia poslala cestu k súboru – otvoríme ju v novej
+        záložke tohto (už bežiaceho) okna namiesto ďalšieho okna."""
+        if self._local_server is None:
+            return
+        sock = self._local_server.nextPendingConnection()
+        if sock is None:
+            return
+        if sock.waitForReadyRead(1000):
+            data = bytes(sock.readAll()).decode("utf-8", "ignore").strip()
+        else:
+            data = ""
+        sock.disconnectFromServer()
+        if data and os.path.isfile(data):
+            self.load_file(data)
+        self._raise_to_front()
+
+    def _raise_to_front(self):
+        if self.isMinimized():
+            self.showNormal()
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
 
 def main():
@@ -1436,12 +1702,34 @@ def main():
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
 
-    win = MReader()
-    win.show()
-
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
-    if args and os.path.isfile(args[0]):
-        win.load_file(args[0])
+    to_open = args[0] if args and os.path.isfile(args[0]) else ""
+
+    # Režim jednej inštancie: ak už M Reader beží, pošli mu súbor (otvorí sa
+    # ako nová záložka) a skonči – neotvárame druhé okno.
+    server_name = f"MReader-{os.environ.get('USERNAME', 'user')}"
+    probe = QLocalSocket()
+    probe.connectToServer(server_name)
+    if probe.waitForConnected(300):
+        probe.write((os.path.abspath(to_open) if to_open else "").encode("utf-8"))
+        probe.flush()
+        probe.waitForBytesWritten(1000)
+        probe.disconnectFromServer()
+        return
+    probe.abort()
+
+    win = MReader()
+
+    # staň sa serverom pre ďalšie spustené kópie
+    QLocalServer.removeServer(server_name)   # odstráň prípadný zvyšok
+    server = QLocalServer()
+    if server.listen(server_name):
+        win._local_server = server
+        server.newConnection.connect(win._handle_new_connection)
+
+    win.show()
+    if to_open:
+        win.load_file(to_open)
 
     sys.exit(app.exec())
 
