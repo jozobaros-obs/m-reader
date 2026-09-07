@@ -20,9 +20,10 @@ convert between formats, search the text, and set it as your default viewer.
 - 🔎 **Full-text search** in the document (Ctrl+F).
 - 🔊 **Read aloud (offline TTS)** — reads the selected text, or starts from where you
   last clicked (the cursor); auto-detects the text language and picks a matching
-  voice. Uses the built-in Windows voices, and falls back to
-  [eSpeak NG](https://github.com/espeak-ng/espeak-ng) for languages Windows doesn't
-  have installed (e.g. Slovak). All offline and free.
+  **built-in Windows voice**. While it's reading, **click anywhere in the text to
+  jump** and continue from there. All offline and free.
+- 🔍 **Zoom** — change the text size with `Ctrl` `+` / `Ctrl` `-`, `Ctrl` `0` to
+  reset, or `Ctrl` + mouse wheel. The zoom level is remembered between sessions.
 - 🎨 **Syntax highlighting** for Markdown code blocks (Pygments).
 - 🌗 **Light / dark theme** — toggling keeps your scroll position.
 - 🌍 **Multi-language UI** — English (default), Slovak, Russian, Spanish.
@@ -94,19 +95,21 @@ The result lands in `dist\M Reader\M Reader.exe` (or `dist\M Reader.exe` with
 | `Ctrl+Shift+O` | Open folder |
 | `Ctrl+F` | Find in text |
 | `Ctrl+R` | Read aloud (selection, or from where you're reading) |
+| `Ctrl` `+` / `Ctrl` `-` | Zoom text in / out (also `Ctrl` + mouse wheel) |
+| `Ctrl+0` | Reset zoom |
 | `Ctrl+D` | Toggle dark mode |
 | `Ctrl+B` | Toggle sidebar |
 
 Use the **Export** button to save the current document as Markdown, PDF or HTML.
 
-> **Read-aloud & OCR extras (optional):** run `install_extras.ps1` to add offline
-> read-aloud for more languages (**eSpeak NG**, e.g. Slovak) and reading of
+> **Read-aloud voices:** M Reader uses the built-in Windows voices. Add more
+> languages under **Settings → Time & language → Speech → Manage voices**.
+>
+> **Scanned-PDF OCR (optional):** run `install_extras.ps1` to enable reading of
 > **scanned/image PDFs** (**Tesseract OCR** + Slovak data):
 > ```powershell
 > powershell -ExecutionPolicy Bypass -File install_extras.ps1
 > ```
-> M Reader first uses the natural Windows voices (**Settings → Time & language →
-> Speech → Manage voices**); for languages Windows lacks it falls back to eSpeak NG.
 > For PDFs with a text layer it reads the text directly; for scanned/image PDFs it
 > runs OCR automatically (if Tesseract is installed).
 
@@ -138,7 +141,7 @@ python -m pip uninstall PySide6 Markdown Pygments PyMuPDF markdownify
 m-reader/
 ├─ m_reader.py        # the application
 ├─ install.ps1        # installer (deps + file associations + shortcut)
-├─ install_extras.ps1 # optional: eSpeak NG (TTS) + Tesseract OCR
+├─ install_extras.ps1 # optional: Tesseract OCR for scanned PDFs
 ├─ uninstall.ps1      # removes associations & shortcut
 ├─ build_exe.ps1      # builds a standalone .exe (PyInstaller)
 ├─ make_icon.ps1      # generates the app icon
