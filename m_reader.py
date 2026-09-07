@@ -457,8 +457,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <style>
-{vars}
 {base}
+</style>
+<style id="mr-theme">
+{vars}
 {pygments}
 </style>
 </head>
@@ -1612,27 +1614,20 @@ class MReader(QMainWindow):
         self.dark = self.theme_action.isChecked()
         self.settings.setValue("dark", self.dark)
         self._style_find_bar()
-        # prekresli všetky záložky s vlastným HTML (md / uvítacia) do novej témy;
-        # používame uložené telo, takže netreba znova parsovať Markdown
+        # Tému prepíname priamo v už načítanej stránke (vymeníme obsah bloku
+        # <style id="mr-theme">), takže nemusíme znova nahrávať celú stránku.
+        # Reload cez setHtml pri opakovanom prepínaní vie nechať QWebEngineView
+        # prázdny a stráca pozíciu rolovania – toto je okamžité a bezpečné.
+        css = (DARK_VARS if self.dark else LIGHT_VARS) + \
+              (PYGMENTS_DARK if self.dark else PYGMENTS_LIGHT)
+        js = ("(function(){var e=document.getElementById('mr-theme');"
+              "if(e){e.textContent=%s;}})();" % json.dumps(css))
         for i in range(self.tabs.count()):
             tab = self.tabs.widget(i)
             if tab.kind == "html" or (tab.kind == "pdf"):
                 continue   # HTML/PDF dokumenty si nesú vlastný štýl
-            if tab is self.cur and tab.body_html:
-                tab.view.page().runJavaScript(
-                    "window.scrollY",
-                    lambda y, t=tab: self._rerender_theme(t, y))
-            elif tab.body_html:
-                base = os.path.dirname(tab.file) if tab.file else None
-                self._render_html_into(tab.view, tab.body_html, base_dir=base)
-
-    def _rerender_theme(self, tab, scroll_y):
-        try:
-            tab.pending_scroll = int(float(scroll_y or 0))
-        except (TypeError, ValueError):
-            tab.pending_scroll = 0
-        base = os.path.dirname(tab.file) if tab.file else None
-        self._render_html_into(tab.view, tab.body_html, base_dir=base)
+            if tab.body_html:
+                tab.view.page().runJavaScript(js)
 
     # ---- auto-reload ------------------------------------------------------- #
     def _on_file_changed(self, path):
