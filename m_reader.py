@@ -16,14 +16,13 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
-import tempfile
+import threading
 import unicodedata
 
 import markdown
 from PySide6.QtCore import (
-    Qt, QFileSystemWatcher, QLocale, QSettings, QUrl, QTimer, Signal,
+    Qt, QEvent, QFileSystemWatcher, QLocale, QSettings, QUrl, QTimer, Signal,
 )
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (
@@ -98,16 +97,6 @@ def file_kind(path):
     return "md"
 
 
-def find_espeak():
-    """Nájde espeak-ng.exe (offline TTS, podporuje aj jazyky, ktoré Windows
-    hlasy nemajú – napr. slovenčinu). Vráti cestu alebo None."""
-    for p in (r"C:\Program Files\eSpeak NG\espeak-ng.exe",
-              r"C:\Program Files (x86)\eSpeak NG\espeak-ng.exe"):
-        if os.path.isfile(p):
-            return p
-    return shutil.which("espeak-ng")
-
-
 def find_tesseract():
     """Nájde tesseract.exe (OCR pre skenované PDF). Vráti cestu alebo None."""
     local = os.environ.get("LOCALAPPDATA", "")
@@ -162,6 +151,9 @@ TRANSLATIONS = {
         "export_html": "To HTML",
         "read_aloud": "Read aloud",
         "stop_reading": "Stop reading",
+        "zoom_in": "Zoom in",
+        "zoom_out": "Zoom out",
+        "zoom_reset": "Reset zoom",
         "pdf_no_text": "This PDF has no text layer and OCR is unavailable — nothing to read.",
         "ocr_running": "Reading text from images (OCR)…",
         "files": "Files",
@@ -198,6 +190,9 @@ TRANSLATIONS = {
         "export_html": "Do HTML",
         "read_aloud": "Prečítať nahlas",
         "stop_reading": "Zastaviť čítanie",
+        "zoom_in": "Priblížiť",
+        "zoom_out": "Oddialiť",
+        "zoom_reset": "Pôvodná veľkosť",
         "pdf_no_text": "Toto PDF nemá textovú vrstvu a OCR nie je dostupné — niet čo čítať.",
         "ocr_running": "Načítavam text z obrázkov (OCR)…",
         "files": "Súbory",
@@ -234,6 +229,9 @@ TRANSLATIONS = {
         "export_html": "В HTML",
         "read_aloud": "Озвучить",
         "stop_reading": "Остановить",
+        "zoom_in": "Увеличить",
+        "zoom_out": "Уменьшить",
+        "zoom_reset": "Сбросить масштаб",
         "pdf_no_text": "В этом PDF нет текстового слоя, OCR недоступен — нечего читать.",
         "ocr_running": "Распознаю текст с изображений (OCR)…",
         "files": "Файлы",
@@ -270,6 +268,9 @@ TRANSLATIONS = {
         "export_html": "A HTML",
         "read_aloud": "Leer en voz alta",
         "stop_reading": "Detener lectura",
+        "zoom_in": "Acercar",
+        "zoom_out": "Alejar",
+        "zoom_reset": "Restablecer zoom",
         "pdf_no_text": "Este PDF no tiene capa de texto y no hay OCR — nada que leer.",
         "ocr_running": "Leyendo texto de las imágenes (OCR)…",
         "files": "Archivos",
@@ -311,7 +312,7 @@ html, body {
     -webkit-font-smoothing: antialiased;
 }
 .markdown-body {
-    max-width: 900px;
+    max-width: 1100px;
     margin: 0 auto;
     padding: 40px 48px 80px 48px;
     word-wrap: break-word;
@@ -342,6 +343,8 @@ html, body {
     border-radius: 8px;
     overflow: auto;
     line-height: 1.45;
+    white-space: pre-wrap;      /* dlhé riadky sa zalomia – žiadny vodorovný posuvník */
+    word-break: break-word;
 }
 .markdown-body pre code {
     background: transparent;
@@ -375,6 +378,22 @@ html, body {
     border-radius: 6px;
     padding: 2px 6px;
     font-size: 85%;
+}
+
+/* Export do PDF: využi celú šírku strany a nikdy nezobrazuj posuvníky. */
+@media print {
+    .markdown-body {
+        max-width: none;
+        margin: 0;
+        padding: 0;
+    }
+    .markdown-body pre,
+    .markdown-body table {
+        overflow: visible;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
+    ::-webkit-scrollbar { display: none; }
 }
 """
 
@@ -512,6 +531,7 @@ CARET_TRACK_JS = r"""
     if (window.__mrTracker) return;
     window.__mrTracker = true;
     window.__mrStart = null;
+    window.__mrClicks = 0;
     document.addEventListener("click", function (e) {
         var pos = null;
         if (document.caretRangeFromPoint) {
@@ -522,6 +542,10 @@ CARET_TRACK_JS = r"""
             if (p) pos = { c: p.offsetNode, o: p.offset };
         }
         window.__mrStart = pos;
+        // Ohlás kliknutie Pythonu cez zmenu titulku (bez QWebChannel).
+        // Ak práve prebieha čítanie, TTS preskočí na toto miesto.
+        window.__mrClicks++;
+        document.title = "mrjump:" + window.__mrClicks;
     }, true);
 })();
 """
@@ -600,7 +624,9 @@ class ReaderPage(QWebEnginePage):
 # --------------------------------------------------------------------------- #
 
 class MReader(QMainWindow):
-    _ocr_ready = Signal(str)   # výsledok OCR z vlákna na pozadí
+    _ocr_ready = Signal(str)      # výsledok OCR / textovej vrstvy z vlákna
+    _status_signal = Signal(str)  # zobrazenie správy v stavovom riadku z vlákna
+    _md_ready = Signal(str, str, object)  # (cesta, telo HTML, toc_tokens)
 
     def __init__(self):
         super().__init__()
@@ -614,24 +640,26 @@ class MReader(QMainWindow):
         self.current_kind = None
         self.current_body_html = ""   # renderované telo (pre export MD -> HTML)
         self._pending_scroll = None   # pozícia rolovania na obnovenie po prekreslení
+        self.zoom = float(self.settings.value("zoom", 1.0))   # priblíženie textu
+        self._reading = False         # práve prebieha čítanie nahlas?
+        self._wheel_filter_installed = False
 
         self.watcher = QFileSystemWatcher(self)
         self.watcher.fileChanged.connect(self._on_file_changed)
 
-        # text-to-speech engine (offline). Uprednostní 'winrt' (OneCore hlasy
-        # Windows – podporujú viac jazykov a dajú sa dosťahovať).
+        # text-to-speech engine – iba vstavané hlasy Windows (SAPI / OneCore).
         self.tts = None
         if QTextToSpeech:
             engines = QTextToSpeech.availableEngines()
-            preferred = [e for e in ("winrt", "sapi") if e in engines]
+            preferred = [e for e in ("sapi", "winrt") if e in engines]
             eng = preferred[0] if preferred else (engines[0] if engines else "")
             self.tts = QTextToSpeech(eng, self) if eng else QTextToSpeech(self)
-        # eSpeak NG – záloha pre jazyky bez Windows hlasu (napr. slovenčina)
-        self.espeak_path = find_espeak()
-        self._espeak_proc = None
-        self._espeak_tmp = None
+            self.tts.stateChanged.connect(self._on_tts_state)
         self.tesseract_path = find_tesseract()   # OCR pre skenované PDF
         self._ocr_ready.connect(self._on_ocr_ready)
+        self._status_signal.connect(
+            lambda m: self.statusBar().showMessage(m, 0))
+        self._md_ready.connect(self._on_md_ready)
 
         self._build_ui()
         self._restore_geometry()
@@ -663,12 +691,14 @@ class MReader(QMainWindow):
         s.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, True)
         self.view.page().pdfPrintingFinished.connect(self._on_pdf_printed)
         self.view.loadFinished.connect(self._on_load_finished)
+        # kliknutie v texte sa hlási cez zmenu titulku -> skok čítania TTS
+        self.view.titleChanged.connect(self._on_view_title)
 
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(self.panel)
         self.splitter.addWidget(self.view)
         self.splitter.setStretchFactor(1, 1)
-        self.splitter.setSizes([240, 900])
+        self.splitter.setSizes([240, 1120])
 
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -735,8 +765,8 @@ class MReader(QMainWindow):
         self.find_action.triggered.connect(self._show_find)
         tb.addAction(self.find_action)
 
-        # Prečítať nahlas (ak je dostupné Windows TTS alebo eSpeak NG)
-        if self.tts or self.espeak_path:
+        # Prečítať nahlas (ak sú dostupné hlasy Windows)
+        if self.tts:
             self.speak_action = QAction(self)
             self.speak_action.setShortcut("Ctrl+R")
             self.speak_action.triggered.connect(self.speak_selection)
@@ -745,6 +775,29 @@ class MReader(QMainWindow):
             self.stop_action = QAction(self)
             self.stop_action.triggered.connect(self.stop_speaking)
             tb.addAction(self.stop_action)
+
+        tb.addSeparator()
+
+        # Priblíženie / oddialenie textu (zmena veľkosti písma)
+        self.zoom_out_action = QAction(self)
+        self.zoom_out_action.setShortcut(QKeySequence.ZoomOut)
+        self.zoom_out_action.triggered.connect(lambda: self._zoom(-0.1))
+        tb.addAction(self.zoom_out_action)
+
+        self.zoom_reset_action = QAction(self)
+        self.zoom_reset_action.setShortcut("Ctrl+0")
+        self.zoom_reset_action.triggered.connect(self._zoom_reset)
+        tb.addAction(self.zoom_reset_action)
+
+        self.zoom_in_action = QAction(self)
+        self.zoom_in_action.setShortcut(QKeySequence.ZoomIn)
+        self.zoom_in_action.triggered.connect(lambda: self._zoom(0.1))
+        tb.addAction(self.zoom_in_action)
+        # Ctrl+'=' ako alternatíva k Ctrl+'+' (bez shiftu)
+        self._zoom_in_alt = QAction(self)
+        self._zoom_in_alt.setShortcut("Ctrl+=")
+        self._zoom_in_alt.triggered.connect(lambda: self._zoom(0.1))
+        self.addAction(self._zoom_in_alt)
 
         tb.addSeparator()
 
@@ -788,9 +841,12 @@ class MReader(QMainWindow):
         self.export_pdf_action.setText(self.t("export_pdf"))
         self.export_html_action.setText(self.t("export_html"))
         self.find_action.setText(self.t("find"))
-        if self.tts or self.espeak_path:
+        if self.tts:
             self.speak_action.setText(self.t("read_aloud"))
             self.stop_action.setText(self.t("stop_reading"))
+        self.zoom_in_action.setText(self.t("zoom_in"))
+        self.zoom_out_action.setText(self.t("zoom_out"))
+        self.zoom_reset_action.setText(self.t("zoom_reset"))
         self.theme_action.setText(self.t("dark_mode"))
         self.panel_action.setText(self.t("panel"))
         self.find_input.setPlaceholderText(self.t("find_ph"))
@@ -860,18 +916,33 @@ class MReader(QMainWindow):
         except (OSError, UnicodeDecodeError) as exc:
             self._render_html(f"<h1>{self.t('read_error')}</h1><pre>{exc}</pre>")
             return
+        # Konverzia Markdownu (najmä pri veľkých súboroch) beží na pozadí,
+        # aby aplikácia počas renderovania nezamrzla.
+        threading.Thread(target=self._md_worker, args=(path, text),
+                         daemon=True).start()
 
-        md = markdown.Markdown(
-            extensions=["extra", "codehilite", "sane_lists", "toc",
-                        "admonition", "nl2br"],
-            extension_configs={
-                "codehilite": {"guess_lang": False, "css_class": "codehilite"},
-                "toc": {"slugify": github_slugify},
-            },
-        )
-        body = md.convert(text)
+    def _md_worker(self, path, text):
+        try:
+            md = markdown.Markdown(
+                extensions=["extra", "codehilite", "sane_lists", "toc",
+                            "admonition", "nl2br"],
+                extension_configs={
+                    "codehilite": {"guess_lang": False, "css_class": "codehilite"},
+                    "toc": {"slugify": github_slugify},
+                },
+            )
+            body = md.convert(text)
+            toc = getattr(md, "toc_tokens", [])
+        except Exception as exc:   # noqa: BLE001 – zobraz chybu namiesto pádu
+            body = f"<h1>{self.t('read_error')}</h1><pre>{exc}</pre>"
+            toc = []
+        self._md_ready.emit(path, body, toc)
+
+    def _on_md_ready(self, path, body, toc):
+        if path != self.current_file:
+            return   # medzičasom sa otvoril iný súbor – zahoď zastaraný výsledok
         self.current_body_html = body
-        self._populate_outline(getattr(md, "toc_tokens", []))
+        self._populate_outline(toc)
         self._render_html(body, base_dir=os.path.dirname(path))
 
     def _build_page(self, content):
@@ -973,6 +1044,15 @@ class MReader(QMainWindow):
         self.view.page().runJavaScript(js)
 
     def _on_load_finished(self, ok):
+        # aplikuj uložené priblíženie na každú načítanú stránku
+        self.view.setZoomFactor(self.zoom)
+        # zachyť Ctrl+koliesko myši pre plynulé priblíženie (vnútorný widget
+        # QWebEngineView vznikne až po prvom načítaní)
+        if not self._wheel_filter_installed:
+            fp = self.view.focusProxy()
+            if fp is not None:
+                fp.installEventFilter(self)
+                self._wheel_filter_installed = True
         if not ok:
             return
         # sleduj kliknutia (kurzor) pre čítanie od pozície – md aj html
@@ -1022,7 +1102,7 @@ class MReader(QMainWindow):
         """Prečíta označený text; ak nič nie je označené, číta od miesta
         posledného kliknutia (kurzora), inak od prvého viditeľného odseku.
         Pri PDF vytiahne text priamo z dokumentu (prípadne cez OCR)."""
-        if not (self.tts or self.espeak_path):
+        if not self.tts:
             return
         if self.current_kind == "pdf":
             self._speak_pdf()
@@ -1031,30 +1111,34 @@ class MReader(QMainWindow):
 
     # ---- PDF: text z dokumentu / OCR --------------------------------------- #
     def _speak_pdf(self):
-        text = self._pdf_text_layer()
+        # Extrakcia textu (aj OCR) beží na pozadí – veľké PDF nezamrazí UI.
+        threading.Thread(target=self._pdf_extract_worker,
+                         args=(self.current_file,), daemon=True).start()
+
+    def _pdf_extract_worker(self, path):
+        text = self._pdf_text_layer(path)
         if text:
-            self._speak_text(text)
+            self._ocr_ready.emit(text)
             return
         # žiadna textová vrstva -> skenované PDF -> OCR (ak je dostupné)
-        if not (self.tesseract_path and self.current_file and fitz):
-            self.statusBar().showMessage(self.t("pdf_no_text"), 8000)
+        if not (self.tesseract_path and path and fitz):
+            self._ocr_ready.emit("")
             return
         try:
             import pytesseract  # noqa: F401
         except ImportError:
-            self.statusBar().showMessage(self.t("pdf_no_text"), 8000)
+            self._ocr_ready.emit("")
             return
-        self.statusBar().showMessage(self.t("ocr_running"), 0)
-        import threading
-        threading.Thread(target=self._ocr_worker,
-                         args=(self.current_file,), daemon=True).start()
+        self._status_signal.emit(self.t("ocr_running"))
+        self._ocr_worker(path)   # sám vyšle _ocr_ready s výsledkom
 
-    def _pdf_text_layer(self):
-        if not (fitz and self.current_file):
+    def _pdf_text_layer(self, path=None):
+        path = path or self.current_file
+        if not (fitz and path):
             return ""
         doc = None
         try:
-            doc = fitz.open(self.current_file)
+            doc = fitz.open(path)
             parts = [p.get_text() for p in doc]
             return "\n".join(parts).strip()
         except Exception:
@@ -1095,20 +1179,15 @@ class MReader(QMainWindow):
             self.statusBar().showMessage(self.t("pdf_no_text"), 8000)
 
     def _speak_text(self, text):
-        if not text or not text.strip():
+        if not (self.tts and text and text.strip()):
             return
         self.stop_speaking()
+        # vyber Windows hlas pre jazyk textu (ak existuje), inak predvolený
         code = self._detect_lang(text)
-        # 1) prirodzený Windows hlas pre daný jazyk (ak existuje)
-        if self.tts and self._set_windows_voice(code):
-            self.tts.say(text)
-            return
-        # 2) eSpeak NG – offline, podporuje aj jazyky bez Windows hlasu (sk…)
-        if self.espeak_path and code and self._speak_espeak(text, code):
-            return
-        # 3) posledná záchrana – predvolený Windows hlas
-        if self.tts:
-            self.tts.say(text)
+        if code:
+            self._set_windows_voice(code)
+        self.tts.say(text)
+        self._reading = True
 
     def _detect_lang(self, text):
         if not detect_language:
@@ -1143,37 +1222,45 @@ class MReader(QMainWindow):
                     return True
         return False
 
-    def _speak_espeak(self, text, code):
-        """Prehrá text cez eSpeak NG (asynchrónne, bez okna konzoly)."""
-        try:
-            fd, path = tempfile.mkstemp(suffix=".txt", prefix="mreader_")
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(text)
-            flags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
-            self._espeak_proc = subprocess.Popen(
-                [self.espeak_path, "-v", code, "-f", path],
-                creationflags=flags,
-            )
-            self._espeak_tmp = path
-            return True
-        except Exception:
-            return False
-
     def stop_speaking(self):
+        self._reading = False
         if self.tts:
             self.tts.stop()
-        if self._espeak_proc and self._espeak_proc.poll() is None:
-            try:
-                self._espeak_proc.terminate()
-            except Exception:
-                pass
-        self._espeak_proc = None
-        if self._espeak_tmp and os.path.exists(self._espeak_tmp):
-            try:
-                os.remove(self._espeak_tmp)
-            except OSError:
-                pass
-            self._espeak_tmp = None
+
+    def _on_tts_state(self, state):
+        """Udržiava príznak čítania podľa stavu enginu – po dočítaní sa čítanie
+        vypne, takže klik po skončení už nespustí čítanie odznova."""
+        S = QTextToSpeech.State
+        active = {S.Speaking, S.Paused}
+        if hasattr(S, "Synthesizing"):
+            active.add(S.Synthesizing)
+        self._reading = state in active
+
+    def _on_view_title(self, title):
+        """Kliknutie v texte (signalizované cez titulok stránky). Ak práve
+        prebieha čítanie, TTS preskočí na miesto kliknutia (kurzor)."""
+        if not (title and title.startswith("mrjump:")):
+            return
+        if self._reading and self.tts:
+            self.view.page().runJavaScript(SPEAK_JS, self._speak_text)
+
+    # ---- priblíženie (veľkosť písma) --------------------------------------- #
+    def _zoom(self, step):
+        self.zoom = max(0.5, min(3.0, round(self.zoom + step, 2)))
+        self.view.setZoomFactor(self.zoom)
+        self.settings.setValue("zoom", self.zoom)
+
+    def _zoom_reset(self):
+        self.zoom = 1.0
+        self.view.setZoomFactor(1.0)
+        self.settings.setValue("zoom", 1.0)
+
+    def eventFilter(self, obj, event):
+        if (event.type() == QEvent.Wheel
+                and event.modifiers() & Qt.ControlModifier):
+            self._zoom(0.1 if event.angleDelta().y() > 0 else -0.1)
+            return True
+        return super().eventFilter(obj, event)
 
     # ---- export ------------------------------------------------------------ #
     def export(self, target):
@@ -1284,7 +1371,7 @@ class MReader(QMainWindow):
         if geo is not None:
             self.restoreGeometry(geo)
         else:
-            self.resize(1150, 800)
+            self.resize(1400, 860)
 
     def closeEvent(self, event):
         self.settings.setValue("geometry", self.saveGeometry())
