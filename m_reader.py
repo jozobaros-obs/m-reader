@@ -704,35 +704,72 @@ class MReader(QMainWindow):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._build_find_bar())
         layout.addWidget(self.splitter)
         self.setCentralWidget(container)
+
+        # kompaktný vyhľadávací panel „pláva" nad zobrazením (pravý horný roh)
+        self._build_find_bar()
+        self.view.installEventFilter(self)   # prepolohuj panel pri zmene veľkosti
 
         self._build_toolbar()
         self._render_welcome()
 
     def _build_find_bar(self):
-        self.find_bar = QWidget()
+        # plávajúci panel – dieťa zobrazenia, aby sa vykreslil nad dokumentom
+        self.find_bar = QWidget(self.view)
+        self.find_bar.setObjectName("mrFindBar")
         h = QHBoxLayout(self.find_bar)
-        h.setContentsMargins(8, 4, 8, 4)
+        h.setContentsMargins(8, 6, 8, 6)
+        h.setSpacing(4)
         self.find_input = QLineEdit()
+        self.find_input.setFixedWidth(220)
+        self.find_input.setClearButtonEnabled(True)
         self.find_input.returnPressed.connect(lambda: self._find(False))
         self.find_input.textChanged.connect(lambda _t: self._find(False))
-        self.find_prev = QPushButton("▲")
-        self.find_prev.setFixedWidth(32)
-        self.find_prev.clicked.connect(lambda: self._find(True))
-        self.find_next = QPushButton("▼")
-        self.find_next.setFixedWidth(32)
-        self.find_next.clicked.connect(lambda: self._find(False))
-        self.find_close = QPushButton("✕")
-        self.find_close.setFixedWidth(32)
-        self.find_close.clicked.connect(self._hide_find)
+        self.find_prev = QToolButton()
+        self.find_prev.setText("▲")
+        self.find_next = QToolButton()
+        self.find_next.setText("▼")
+        self.find_close = QToolButton()
+        self.find_close.setText("✕")
+        for btn, handler in ((self.find_prev, lambda: self._find(True)),
+                             (self.find_next, lambda: self._find(False)),
+                             (self.find_close, self._hide_find)):
+            btn.setAutoRaise(True)
+            btn.setFixedSize(24, 24)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(handler)
         h.addWidget(self.find_input)
         h.addWidget(self.find_prev)
         h.addWidget(self.find_next)
         h.addWidget(self.find_close)
+        self._style_find_bar()
         self.find_bar.hide()
         return self.find_bar
+
+    def _style_find_bar(self):
+        """Vzhľad plávajúceho panela podľa aktuálnej témy."""
+        if self.dark:
+            bg, fg, bd = "#1c2128", "#e6edf3", "#30363d"
+        else:
+            bg, fg, bd = "#ffffff", "#1f2328", "#d0d7de"
+        self.find_bar.setStyleSheet(
+            f"#mrFindBar {{ background: {bg}; border: 1px solid {bd};"
+            f" border-radius: 8px; }}"
+            f"#mrFindBar QLineEdit {{ border: 1px solid {bd}; border-radius: 6px;"
+            f" padding: 3px 6px; background: {bg}; color: {fg}; }}"
+            f"#mrFindBar QToolButton {{ border: none; color: {fg};"
+            f" border-radius: 4px; font-size: 12px; }}"
+            f"#mrFindBar QToolButton:hover {{ background: {bd}; }}")
+
+    def _position_find_bar(self):
+        """Umiestni panel do pravého horného rohu zobrazenia."""
+        if not getattr(self, "find_bar", None):
+            return
+        self.find_bar.adjustSize()
+        margin = 14
+        x = self.view.width() - self.find_bar.width() - margin
+        self.find_bar.move(max(margin, x), margin)
 
     def _build_toolbar(self):
         tb = self.addToolBar("Main")
@@ -1077,7 +1114,9 @@ class MReader(QMainWindow):
 
     # ---- vyhľadávanie ------------------------------------------------------ #
     def _show_find(self):
+        self._position_find_bar()
         self.find_bar.show()
+        self.find_bar.raise_()
         self.find_input.setFocus()
         self.find_input.selectAll()
 
@@ -1260,6 +1299,8 @@ class MReader(QMainWindow):
                 and event.modifiers() & Qt.ControlModifier):
             self._zoom(0.1 if event.angleDelta().y() > 0 else -0.1)
             return True
+        if obj is self.view and event.type() == QEvent.Resize:
+            self._position_find_bar()
         return super().eventFilter(obj, event)
 
     # ---- export ------------------------------------------------------------ #
@@ -1342,6 +1383,7 @@ class MReader(QMainWindow):
     def toggle_theme(self):
         self.dark = self.theme_action.isChecked()
         self.settings.setValue("dark", self.dark)
+        self._style_find_bar()
         if self.current_kind == "md" and self.current_file:
             # najprv zisti aktuálnu pozíciu rolovania, potom prekresli a obnov ju
             self.view.page().runJavaScript("window.scrollY", self._rerender_keep_scroll)
