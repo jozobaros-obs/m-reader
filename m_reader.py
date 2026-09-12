@@ -12,13 +12,17 @@ ich vzájomný export do Markdownu, PDF alebo HTML. Ďalej ponúka:
   * Otvorenie súboru cez argument príkazového riadka (asociácia .md/.html/.pdf).
 """
 
+import atexit
+import base64
 import json
 import os
 import re
 import shutil
 import sys
+import tempfile
 import threading
 import unicodedata
+from html import escape as html_escape
 
 import markdown
 from PySide6.QtCore import (
@@ -158,6 +162,11 @@ TRANSLATIONS = {
         "new_tab": "New tab",
         "pdf_no_text": "This PDF has no text layer and OCR is unavailable — nothing to read.",
         "ocr_running": "Reading text from images (OCR)…",
+        "pdf_text_mode": "Text mode",
+        "pdf_text_tip": "Show the PDF as reflowed text — click anywhere and Ctrl+R reads from there",
+        "pdf_page": "Page",
+        "pdf_converting": "Converting the PDF to text…",
+        "pdf_tip_text": "Tip: turn on Text mode (Ctrl+T) to start reading from the clicked position.",
         "files": "Files",
         "outline": "Contents",
         "language_tip": "Language",
@@ -198,6 +207,11 @@ TRANSLATIONS = {
         "new_tab": "Nová záložka",
         "pdf_no_text": "Toto PDF nemá textovú vrstvu a OCR nie je dostupné — niet čo čítať.",
         "ocr_running": "Načítavam text z obrázkov (OCR)…",
+        "pdf_text_mode": "Textový režim",
+        "pdf_text_tip": "Zobrazí PDF ako plynulý text — klikni do textu a Ctrl+R číta odtiaľ",
+        "pdf_page": "Strana",
+        "pdf_converting": "Prevádzam PDF na text…",
+        "pdf_tip_text": "Tip: zapni Textový režim (Ctrl+T) a čítanie začne od miesta kliknutia.",
         "files": "Súbory",
         "outline": "Obsah",
         "language_tip": "Jazyk",
@@ -238,6 +252,11 @@ TRANSLATIONS = {
         "new_tab": "Новая вкладка",
         "pdf_no_text": "В этом PDF нет текстового слоя, OCR недоступен — нечего читать.",
         "ocr_running": "Распознаю текст с изображений (OCR)…",
+        "pdf_text_mode": "Текстовый режим",
+        "pdf_text_tip": "Показывает PDF как сплошной текст — щёлкните в тексте, и Ctrl+R читает с этого места",
+        "pdf_page": "Страница",
+        "pdf_converting": "Преобразование PDF в текст…",
+        "pdf_tip_text": "Совет: включите текстовый режим (Ctrl+T), чтобы читать с места щелчка.",
         "files": "Файлы",
         "outline": "Содержание",
         "language_tip": "Язык",
@@ -278,6 +297,11 @@ TRANSLATIONS = {
         "new_tab": "Nueva pestaña",
         "pdf_no_text": "Este PDF no tiene capa de texto y no hay OCR — nada que leer.",
         "ocr_running": "Leyendo texto de las imágenes (OCR)…",
+        "pdf_text_mode": "Modo texto",
+        "pdf_text_tip": "Muestra el PDF como texto continuo — haz clic en el texto y Ctrl+R lee desde ahí",
+        "pdf_page": "Página",
+        "pdf_converting": "Convirtiendo el PDF a texto…",
+        "pdf_tip_text": "Consejo: activa el Modo texto (Ctrl+T) para leer desde el punto donde hagas clic.",
         "files": "Archivos",
         "outline": "Contenido",
         "language_tip": "Idioma",
@@ -614,6 +638,325 @@ SPEAK_JS = r"""
 
 
 # --------------------------------------------------------------------------- #
+#  PDF -> HTML (textový režim)                                                 #
+#                                                                              #
+#  Vstavaný PDF prehliadač Chromia je uzavretý plugin – nedá sa doň vložiť      #
+#  JavaScript, takže v ňom nefunguje sledovanie kurzora (kliknutia) ani         #
+#  čítanie od danej pozície. Preto vieme PDF previesť na plynulé HTML, ktoré    #
+#  ide cez rovnaký renderer ako Markdown – a tým funguje klik -> čítaj odtiaľ,  #
+#  výber textu, Ctrl+F aj bočný obsah.                                         #
+# --------------------------------------------------------------------------- #
+
+PDF_BULLETS = "•◦▪‣·∙●○*-–—"
+
+# Štýl pre stránkové oddeľovače a obrázky. Číslo strany je v CSS (``content``),
+# nie v DOM – TTS ho teda pri čítaní nevysloví.
+PDF_TEXT_CSS = """
+<style>
+.mr-page-sep { border-top: 1px solid var(--border); text-align: center;
+    margin: 36px 0 22px; height: 0; }
+.mr-page-sep::after { content: attr(data-page); display: inline-block;
+    transform: translateY(-0.75em); background: var(--bg); padding: 0 10px;
+    color: var(--muted); font-size: 12px; letter-spacing: .04em; }
+.mr-img { text-align: center; margin: 1.2em 0; }
+</style>
+"""
+
+
+def _pdf_span_bold(span):
+    if span.get("flags", 0) & 16:          # bit 4 = tučné písmo
+        return True
+    name = (span.get("font") or "").lower()
+    return any(h in name for h in ("bold", "black", "heavy", "semib"))
+
+
+def _pdf_join_lines(lines):
+    """Spojí riadky odseku a opraví slová rozdelené pomlčkou na konci riadka."""
+    out = ""
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        if not out:
+            out = line
+        elif (out.endswith("-") and len(out) > 1 and out[-2].isalpha()
+              and line[:1].islower()):
+            out = out[:-1] + line
+        else:
+            out += " " + line
+    return out
+
+
+def _pdf_collect(doc):
+    """Vytiahne bloky textu/obrázkov po stranách. Vráti aj veľkosť bežného
+    písma a šírku znaku neproporcionálnych (kódových) fontov."""
+    pages, sizes, ratios = [], {}, {}
+    for pno, page in enumerate(doc, start=1):
+        try:
+            raw = page.get_text("dict", sort=True)
+        except TypeError:          # staršie PyMuPDF nepozná sort=
+            raw = page.get_text("dict")
+        blocks = []
+        for b in raw.get("blocks", []):
+            if b.get("type") == 1:
+                blocks.append({"type": "image", "bbox": b.get("bbox", (0, 0, 0, 0)),
+                               "data": b.get("image"), "ext": b.get("ext") or "png",
+                               "w": b.get("width", 0), "h": b.get("height", 0)})
+                continue
+            rows, fonts, size, chars, bold = [], set(), 0.0, 0, True
+            for line in b.get("lines", []):
+                text = "".join(sp.get("text", "") for sp in line.get("spans", []))
+                if not text.strip():
+                    continue
+                lb = line.get("bbox", (0, 0, 0, 0))
+                rows.append({"x0": lb[0], "y0": lb[1], "y1": lb[3], "text": text})
+                for sp in line.get("spans", []):
+                    piece = sp.get("text", "")
+                    if not piece.strip():
+                        continue
+                    chars += len(piece.strip())
+                    span_size = sp.get("size", 0.0)
+                    size = max(size, span_size)
+                    if not _pdf_span_bold(sp):
+                        bold = False
+                    font = sp.get("font") or "?"
+                    fonts.add(font)
+                    sizes[round(span_size * 2) / 2] = (
+                        sizes.get(round(span_size * 2) / 2, 0) + len(piece.strip()))
+                    # pomer „šírka znaku / veľkosť písma" – pri neproporcionálnom
+                    # (kódovom) fonte je rovnaký bez ohľadu na obsah
+                    sb = sp.get("bbox", (0, 0, 0, 0))
+                    width = sb[2] - sb[0]
+                    if len(piece) >= 3 and span_size > 0 and width > 0:
+                        seen = ratios.setdefault(font, [])
+                        if len(seen) < 400:
+                            seen.append(width / len(piece) / span_size)
+            if not rows:
+                continue
+            blocks.append({"type": "text", "bbox": b.get("bbox", (0, 0, 0, 0)),
+                           "rows": rows, "lines": [r["text"] for r in rows],
+                           "fonts": fonts, "size": size, "bold": bold,
+                           "chars": chars, "skip": False})
+        pages.append({"no": pno, "height": page.rect.height or 1, "blocks": blocks})
+
+    body_size = max(sizes, key=sizes.get) if sizes else 11.0
+    # Fonty rozdelíme na neproporcionálne (kód) a proporcionálne (bežný text).
+    # Pri fonte s príliš málo vzorkami sa nedá rozhodnúť – ten necháme „neznámy",
+    # aby krátky úryvok nepokazil zaradenie celého riadka kódu.
+    mono, proportional = {}, set()
+    for font, vals in ratios.items():
+        if len(vals) < 3:
+            continue
+        mean = sum(vals) / len(vals)
+        if mean <= 0:
+            continue
+        spread = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
+        if spread <= 0.03 * mean:      # rovnako široké znaky = kódový font
+            mono[font] = mean
+        else:
+            proportional.add(font)
+    for pg in pages:
+        for b in pg["blocks"]:
+            if b["type"] != "text":
+                continue
+            widths = [mono[f] for f in b["fonts"] if f in mono]
+            b["mono"] = bool(widths) and not (b["fonts"] & proportional)
+            b["char_w"] = ((sum(widths) / len(widths)) * (b["size"] or body_size)
+                           if b["mono"] else 0.0)
+    return pages, (body_size or 11.0)
+
+
+def _pdf_drop_running_heads(pages):
+    """Označí opakujúce sa hlavičky/pätky (a čísla strán), nech ich TTS nečíta."""
+    top, bottom = {}, {}
+    for pg in pages:
+        height = pg["height"]
+        for b in pg["blocks"]:
+            if b["type"] != "text":
+                continue
+            text = " ".join(b["lines"]).strip()
+            if not text or len(text) > 90:
+                continue
+            y0, y1 = b["bbox"][1], b["bbox"][3]
+            near_top, near_bottom = y1 < height * 0.09, y0 > height * 0.90
+            if not (near_top or near_bottom):
+                continue
+            if re.fullmatch(r"[\s\-–—|]*\d{1,4}[\s\-–—|]*", text):
+                b["skip"] = True        # holé číslo strany
+                continue
+            key = re.sub(r"\d+", "#", text).strip().lower()
+            bucket = top if near_top else bottom
+            bucket.setdefault(key, []).append(b)
+    limit = max(3, int(len(pages) * 0.4))
+    for bucket in (top, bottom):
+        for blocks in bucket.values():
+            if len(blocks) >= limit:
+                for b in blocks:
+                    b["skip"] = True
+
+
+def _pdf_code_html(group):
+    """Zlúči susedné riadky kódu do jedného <pre> a obnoví odsadenie podľa
+    vodorovnej pozície v PDF (v PDF nie sú medzery, iba súradnice)."""
+    rows = []
+    for b in group:
+        for r in b["rows"]:
+            text = r["text"].strip()
+            if not text:
+                continue
+            if rows and r["y0"] < rows[-1]["y1"] - 1:
+                # rovnaký vizuálny riadok (napr. kód + komentár vpravo)
+                rows[-1]["text"] += "  " + text
+                rows[-1]["y1"] = max(rows[-1]["y1"], r["y1"])
+            else:
+                rows.append({"x0": r["x0"], "y1": r["y1"], "text": text,
+                             "cw": b["char_w"]})
+    if not rows:
+        return ""
+    base = min(r["x0"] for r in rows)
+    out = []
+    for r in rows:
+        cw = r["cw"] or 0
+        indent = int(round((r["x0"] - base) / cw)) if cw > 0 else 0
+        out.append(" " * max(0, min(indent, 40)) + r["text"])
+    return "<pre><code>%s</code></pre>" % html_escape("\n".join(out))
+
+
+def pdf_to_html(path, page_label="Page", image_budget=12 * 1024 * 1024):
+    """Prevedie PDF na plynulé HTML. Vráti (telo_html, zoznam_nadpisov)."""
+    doc = fitz.open(path)
+    try:
+        pages, body_size = _pdf_collect(doc)
+    finally:
+        doc.close()
+    _pdf_drop_running_heads(pages)
+
+    out, headings, code, para = [PDF_TEXT_CSS], [], [], []
+    state = {"list": False}
+    bullet_re = re.compile(r"^[%s]\s+(\S.*)$" % re.escape(PDF_BULLETS), re.S)
+
+    def close_list():
+        if state["list"]:
+            out.append("</ul>")
+            state["list"] = False
+
+    def flush_code():
+        if code:
+            flush_para()
+            close_list()
+            out.append(_pdf_code_html(code))
+            del code[:]
+
+    def flush_para():
+        """Vypíše nazbierané riadky ako jeden odsek (alebo položku zoznamu)."""
+        if not para:
+            return
+        lines = []
+        for blk in para:
+            lines.extend(blk["lines"])
+        del para[:]
+        text = _pdf_join_lines(lines)
+        if not text:
+            return
+        item = bullet_re.match(text)
+        if item:
+            if not state["list"]:
+                out.append("<ul>")
+                state["list"] = True
+            out.append("<li>%s</li>" % html_escape(item.group(1)))
+        else:
+            close_list()
+            out.append("<p>%s</p>" % html_escape(text))
+
+    for pg in pages:
+        flush_code()
+        flush_para()
+        close_list()
+        if pg["no"] == 1:
+            out.append('<div id="mr-page-1"></div>')
+        else:
+            out.append('<div class="mr-page-sep" id="mr-page-%d" data-page="%s"></div>'
+                       % (pg["no"],
+                          html_escape("%s %d" % (page_label, pg["no"]), True)))
+        for b in pg["blocks"]:
+            if b["type"] == "image":
+                data = b.get("data")
+                if not (data and image_budget > len(data)
+                        and b["w"] >= 48 and b["h"] >= 48):
+                    continue
+                image_budget -= len(data)
+                flush_code()
+                flush_para()
+                close_list()
+                out.append('<p class="mr-img"><img alt="" src="data:image/%s;base64,%s"></p>'
+                           % (b["ext"], base64.b64encode(data).decode("ascii")))
+                continue
+            if b["skip"]:
+                continue
+            # riadky kódu sú v PDF samostatné bloky – zlučujeme ich, kým na seba
+            # zvisle nadväzujú
+            if b["mono"] and b["chars"]:
+                if code and b["bbox"][1] - code[-1]["bbox"][3] > 1.8 * body_size:
+                    flush_code()
+                flush_para()
+                code.append(b)
+                continue
+            flush_code()
+            text = _pdf_join_lines(b["lines"])
+            if not text:
+                continue
+            ratio = b["size"] / body_size if body_size else 1.0
+            if ratio >= 1.7:
+                level = 1
+            elif ratio >= 1.4:
+                level = 2
+            elif ratio >= 1.18:
+                level = 3
+            elif b["bold"] and ratio >= 1.0 and len(text) <= 120:
+                level = 4
+            else:
+                level = 0
+            if level:
+                flush_para()
+                close_list()
+                hid = "mr-h-%d" % len(headings)
+                headings.append({"level": level, "text": text, "id": hid})
+                out.append('<h%d id="%s">%s</h%d>'
+                           % (level, hid, html_escape(text), level))
+                continue
+            # Riadky jedného odseku sú v PDF samostatné bloky – spájame ich,
+            # kým sedí veľkosť písma, ľavý okraj aj riadkovanie.
+            if para:
+                prev, first = para[-1], para[0]
+                if not (abs(b["size"] - prev["size"]) < 0.6
+                        and b["bbox"][1] - prev["bbox"][3] <= 0.75 * body_size
+                        and abs(b["bbox"][0] - first["bbox"][0]) <= 14
+                        and not bullet_re.match(text)):
+                    flush_para()
+            para.append(b)
+    flush_code()
+    flush_para()
+    close_list()
+
+    if not headings:      # bez nadpisov ponúkni v bočnom paneli aspoň strany
+        headings = [{"level": 1, "text": "%s %d" % (page_label, pg["no"]),
+                     "id": "mr-page-%d" % pg["no"]} for pg in pages]
+    return "\n".join(out), headings
+
+
+_PDF_TEXT_DIR = None
+
+
+def pdf_text_cache_dir():
+    """Priečinok pre dočasné HTML z PDF – zmaže sa pri ukončení aplikácie."""
+    global _PDF_TEXT_DIR
+    if _PDF_TEXT_DIR is None:
+        _PDF_TEXT_DIR = tempfile.mkdtemp(prefix="mreader-")
+        atexit.register(shutil.rmtree, _PDF_TEXT_DIR, True)
+    return _PDF_TEXT_DIR
+
+
+# --------------------------------------------------------------------------- #
 #  WebEnginePage – externé odkazy otvárame v prehliadači                       #
 # --------------------------------------------------------------------------- #
 
@@ -638,8 +981,10 @@ class DocTab(QWidget):
         self.body_html = ""       # renderované telo (pre export MD -> HTML)
         self.pending_scroll = None    # obnovenie pozície po prekreslení
         self.toc = []             # toc_tokens pre Markdown obsah (bočný panel)
-        self.headings = []        # ploché nadpisy pre HTML obsah
+        self.headings = []        # ploché nadpisy pre HTML/PDF obsah
         self.filters_installed = False   # už sú nainštalované event-filtre?
+        self.pdf_text = False     # PDF zobrazené ako plynulý text (nie plugin)
+        self.pdf_html = ""        # dočasné HTML vyrobené z PDF
 
         self.view = QWebEngineView()
         self.view.setPage(ReaderPage(self.view))
@@ -661,6 +1006,7 @@ class MReader(QMainWindow):
     _ocr_ready = Signal(str)      # výsledok OCR / textovej vrstvy z vlákna
     _status_signal = Signal(str)  # zobrazenie správy v stavovom riadku z vlákna
     _md_ready = Signal(object, str, str, object)  # (tab, cesta, telo, toc_tokens)
+    _pdf_html_ready = Signal(object, str, str, object)  # (tab, cesta, html, nadpisy)
 
     def __init__(self):
         super().__init__()
@@ -671,6 +1017,8 @@ class MReader(QMainWindow):
             self.lang = DEFAULT_LANG
         self.current_dir = None       # priečinok zobrazený v bočnom paneli
         self.zoom = float(self.settings.value("zoom", 1.0))   # priblíženie textu
+        # PDF: zobrazovať ako plynulý text (klik -> čítanie od kurzora)?
+        self.pdf_text_mode = self.settings.value("pdf_text_mode", False, type=bool)
         self._reading = False         # práve prebieha čítanie nahlas?
         self._local_server = None     # server pre režim jednej inštancie
 
@@ -690,6 +1038,7 @@ class MReader(QMainWindow):
         self._status_signal.connect(
             lambda m: self.statusBar().showMessage(m, 0))
         self._md_ready.connect(self._on_md_ready)
+        self._pdf_html_ready.connect(self._on_pdf_html_ready)
 
         self._build_ui()
         self._restore_geometry()
@@ -899,6 +1248,16 @@ class MReader(QMainWindow):
             self.stop_action.triggered.connect(self.stop_speaking)
             tb.addAction(self.stop_action)
 
+        # PDF: prepnutie medzi vstavaným prehliadačom a plynulým textom.
+        # Zobrazuje sa iba pri otvorenom PDF (viď _update_pdf_action).
+        self.pdf_mode_action = QAction(self)
+        self.pdf_mode_action.setCheckable(True)
+        self.pdf_mode_action.setChecked(self.pdf_text_mode)
+        self.pdf_mode_action.setShortcut("Ctrl+T")
+        self.pdf_mode_action.setVisible(False)
+        self.pdf_mode_action.triggered.connect(self._toggle_pdf_text)
+        tb.addAction(self.pdf_mode_action)
+
         tb.addSeparator()
 
         # Priblíženie / oddialenie textu (zmena veľkosti písma)
@@ -971,6 +1330,8 @@ class MReader(QMainWindow):
         self.export_pdf_action.setText(self.t("export_pdf"))
         self.export_html_action.setText(self.t("export_html"))
         self.find_action.setText(self.t("find"))
+        self.pdf_mode_action.setText(self.t("pdf_text_mode"))
+        self.pdf_mode_action.setToolTip(self.t("pdf_text_tip"))
         if self.tts:
             self.speak_action.setText(self.t("read_aloud"))
             self.stop_action.setText(self.t("stop_reading"))
@@ -1052,14 +1413,12 @@ class MReader(QMainWindow):
         elif tab.kind == "html":
             tab.view.setUrl(QUrl.fromLocalFile(path))
         elif tab.kind == "pdf":
-            # PDF prehliadač má vlastný (funkčný) obsah – náš zbytočný TOC
-            # nezobrazujeme, prepneme na záložku Súbory.
-            if tab is self.cur:
-                self.panel.setCurrentIndex(0)
-            tab.view.setUrl(QUrl.fromLocalFile(path))
+            tab.pdf_text = bool(self.pdf_text_mode)
+            self._load_pdf_into(tab)
 
         self._set_tab_title(tab)
         self._update_window_title()
+        self._update_pdf_action()
 
     def _file_open_elsewhere(self, path, exclude_tab):
         for i in range(self.tabs.count()):
@@ -1103,10 +1462,11 @@ class MReader(QMainWindow):
         # obsah (bočný panel) podľa typu dokumentu aktuálnej záložky
         if tab.kind == "md":
             self._populate_outline(tab.toc)
-        elif tab.kind == "html" and tab.headings:
+        elif tab.kind in ("html", "pdf") and tab.headings:
             self._populate_outline_flat(tab.headings)
         else:
             self.outline.clear()
+        self._update_pdf_action()
         # bočný panel súborov + priečinok
         if tab.file:
             directory = os.path.dirname(tab.file)
@@ -1182,6 +1542,92 @@ class MReader(QMainWindow):
         if tab is self.cur:
             self._populate_outline(toc)
         self._render_html_into(tab.view, body, base_dir=os.path.dirname(path))
+
+    # ---- PDF: vstavaný prehliadač / plynulý text --------------------------- #
+    def _load_pdf_into(self, tab):
+        """Zobrazí PDF – buď vstavaným prehliadačom Chromia, alebo (v textovom
+        režime) ako plynulé HTML, v ktorom funguje čítanie od kurzora."""
+        if tab.pdf_text and not fitz:
+            tab.pdf_text = False
+            self.statusBar().showMessage(self.t("need_pymupdf"), 8000)
+        if tab.pdf_text:
+            self.statusBar().showMessage(self.t("pdf_converting"), 0)
+            threading.Thread(target=self._pdf_html_worker,
+                             args=(tab, tab.file), daemon=True).start()
+            return
+        # vstavaný prehliadač má vlastný (funkčný) obsah – náš TOC netreba
+        if tab is self.cur:
+            self.panel.setCurrentIndex(0)
+        tab.view.setUrl(QUrl.fromLocalFile(tab.file))
+
+    def _pdf_html_worker(self, tab, path):
+        """Prevod PDF -> HTML beží mimo hlavného vlákna; hotovú stránku
+        odkladáme do dočasného súboru (setHtml má limit 2 MB)."""
+        try:
+            body, headings = pdf_to_html(path, self.t("pdf_page"))
+        except Exception as exc:   # noqa: BLE001 – radšej chybu zobraz
+            body = "<h1>%s</h1><pre>%s</pre>" % (self.t("read_error"),
+                                                 html_escape(str(exc)))
+            headings = []
+        try:
+            name = "%s-%08x.html" % (
+                re.sub(r"[^\w.-]+", "_", os.path.basename(path))[:60],
+                abs(hash(path)) & 0xFFFFFFFF)
+            dest = os.path.join(pdf_text_cache_dir(), name)
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(self._build_page(body))
+        except OSError as exc:
+            dest = ""
+            body = str(exc)
+        self._pdf_html_ready.emit(tab, path, dest, headings)
+
+    def _on_pdf_html_ready(self, tab, path, dest, headings):
+        self.statusBar().clearMessage()
+        try:
+            if self.tabs.indexOf(tab) < 0:
+                return   # záložka bola medzičasom zatvorená
+        except RuntimeError:
+            return
+        if tab.file != path or not tab.pdf_text:
+            return   # medzitým sa záložka alebo režim zmenil
+        if not dest:
+            self.statusBar().showMessage(self.t("read_error"), 8000)
+            return
+        tab.pdf_html = dest
+        tab.headings = headings
+        if tab is self.cur:
+            if headings:
+                self._populate_outline_flat(headings)
+                self.panel.setCurrentIndex(1)
+            else:
+                self.outline.clear()
+        tab.view.setUrl(QUrl.fromLocalFile(dest))
+
+    def _toggle_pdf_text(self, checked):
+        """Prepne aktuálne PDF medzi prehliadačom a textom (a zapamätá voľbu)."""
+        checked = bool(checked)
+        self.pdf_text_mode = checked
+        self.settings.setValue("pdf_text_mode", checked)
+        tab = self.cur
+        if tab is None or tab.kind != "pdf" or not tab.file:
+            return
+        self.stop_speaking()
+        tab.pdf_text = checked
+        tab.headings = []
+        self.outline.clear()
+        self._load_pdf_into(tab)
+
+    def _update_pdf_action(self):
+        """Tlačidlo textového režimu je viditeľné iba pri otvorenom PDF."""
+        action = getattr(self, "pdf_mode_action", None)
+        if action is None:
+            return
+        tab = self.cur
+        is_pdf = tab is not None and tab.kind == "pdf" and fitz is not None
+        action.setVisible(bool(is_pdf))
+        action.blockSignals(True)
+        action.setChecked(bool(tab.pdf_text) if is_pdf else self.pdf_text_mode)
+        action.blockSignals(False)
 
     def _build_page(self, content):
         return HTML_TEMPLATE.format(
@@ -1311,8 +1757,9 @@ class MReader(QMainWindow):
             fp.setProperty("mrWheelFilter", True)
         if not ok:
             return
-        # sleduj kliknutia (kurzor) pre čítanie od pozície – md aj html
-        if tab.kind in ("md", "html"):
+        # sleduj kliknutia (kurzor) pre čítanie od pozície – md, html aj
+        # PDF v textovom režime (vo vstavanom PDF plugine to nejde)
+        if tab.kind in ("md", "html") or (tab.kind == "pdf" and tab.pdf_text):
             view.page().runJavaScript(CARET_TRACK_JS)
         # pre HTML súbory zostavíme obsah až po načítaní stránky
         if tab.kind == "html":
@@ -1369,8 +1816,9 @@ class MReader(QMainWindow):
         Pri PDF vytiahne text priamo z dokumentu (prípadne cez OCR)."""
         if not self.tts:
             return
-        if self.current_kind == "pdf":
-            self._speak_pdf()
+        tab = self.cur
+        if self.current_kind == "pdf" and not (tab and tab.pdf_text):
+            self._speak_pdf()      # vstavaný prehliadač – vždy od začiatku
         else:
             self.view.page().runJavaScript(SPEAK_JS, self._speak_text)
 
@@ -1440,6 +1888,9 @@ class MReader(QMainWindow):
         self.statusBar().clearMessage()
         if text and text.strip():
             self._speak_text(text)
+            tab = self.cur
+            if fitz and tab is not None and tab.kind == "pdf" and not tab.pdf_text:
+                self.statusBar().showMessage(self.t("pdf_tip_text"), 10000)
         else:
             self.statusBar().showMessage(self.t("pdf_no_text"), 8000)
 
@@ -1624,9 +2075,9 @@ class MReader(QMainWindow):
               "if(e){e.textContent=%s;}})();" % json.dumps(css))
         for i in range(self.tabs.count()):
             tab = self.tabs.widget(i)
-            if tab.kind == "html" or (tab.kind == "pdf"):
-                continue   # HTML/PDF dokumenty si nesú vlastný štýl
-            if tab.body_html:
+            if tab.kind == "html" or (tab.kind == "pdf" and not tab.pdf_text):
+                continue   # HTML a vstavaný PDF prehliadač si nesú vlastný štýl
+            if tab.body_html or (tab.kind == "pdf" and tab.pdf_text):
                 tab.view.page().runJavaScript(js)
 
     # ---- auto-reload ------------------------------------------------------- #

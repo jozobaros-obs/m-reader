@@ -16,6 +16,11 @@ convert between formats, search the text, and set it as your default viewer.
 
 - 📄 **Reads Markdown, HTML and PDF** in one window (GitHub-style Markdown rendering,
   native PDF viewer, direct HTML rendering).
+- 📝 **PDF text mode** (`Ctrl+T`) — re-flows a PDF into clean text (headings, code
+  blocks with their indentation, lists, images) rendered like Markdown. The native
+  PDF viewer is a closed plugin, so in text mode you get what it can't offer:
+  **click anywhere and read aloud from there**, text selection and the **Contents**
+  sidebar. The choice is remembered.
 - 🗂️ **Tabs** — every document opens in its own tab (like a browser or Notepad++).
   Opening a file from Explorer reuses the running window and adds a **new tab**
   instead of launching another copy of the app (single-instance).
@@ -24,7 +29,9 @@ convert between formats, search the text, and set it as your default viewer.
 - 🔊 **Read aloud (offline TTS)** — reads the selected text, or starts from where you
   last clicked (the cursor); auto-detects the text language and picks a matching
   **built-in Windows voice**. While it's reading, **click anywhere in the text to
-  jump** and continue from there. All offline and free.
+  jump** and continue from there. Works in Markdown, HTML and in PDFs opened in
+  **text mode** (`Ctrl+T`); the native PDF viewer can only read from the start.
+  All offline and free.
 - 🔍 **Zoom** — change the text size with `Ctrl` `+` / `Ctrl` `-`, `Ctrl` `0` to
   reset, or `Ctrl` + mouse wheel. The zoom level is remembered between sessions.
 - 🎨 **Syntax highlighting** for Markdown code blocks (Pygments).
@@ -122,6 +129,7 @@ The result lands in `dist\M Reader\M Reader.exe` (or `dist\M Reader.exe` with
 | `Ctrl+Shift+O` | Open folder |
 | `Ctrl+W` | Close current tab |
 | `Ctrl+F` | Find in text |
+| `Ctrl+T` | PDF: switch between the native viewer and text mode |
 | `Ctrl+R` | Read aloud (selection, or from where you're reading) |
 | `Ctrl` `+` / `Ctrl` `-` | Zoom text in / out (also `Ctrl` + mouse wheel) |
 | `Ctrl+0` | Reset zoom |
@@ -141,8 +149,9 @@ Use the **Export** button to save the current document as Markdown, PDF or HTML.
 > For PDFs with a text layer it reads the text directly; for scanned/image PDFs it
 > runs OCR automatically (if Tesseract is installed).
 
-> **PDF outline:** for PDFs, use the PDF viewer's own outline/bookmarks panel; the
-> sidebar **Contents** tab is used for Markdown and HTML documents.
+> **PDF outline:** in the native PDF viewer use its own outline/bookmarks panel.
+> In **text mode** (`Ctrl+T`) the sidebar **Contents** tab is filled from the
+> headings found in the PDF (or from page numbers when it has none).
 
 Run it directly without installing:
 
